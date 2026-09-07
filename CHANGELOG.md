@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- Exclude the active managed wrapper directory when resolving dependencies during upgrades.
+- Add isolated regression coverage for upgrade cycles and non-interactive version probes.
+
 ## 0.1.1
 
 - Close standard input during dependency version probes. Older bzip2 versions otherwise wait for input in interactive terminals.

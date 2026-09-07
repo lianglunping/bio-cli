@@ -37,7 +37,7 @@ if a.shell_file and a.shell_file.exists():
     if '# bio-cli: managed PATH entry' in text and line not in text:
         raise SystemExit('Existing PATH marker differs; inspect manually')
 version=(source/'VERSION').read_text().strip()
-files=['bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py']
+files=['bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
 h=hashlib.sha256()
 for file in files:h.update(file.encode());h.update((source/file).read_bytes())
 release_id=version+'-'+h.hexdigest()[:12]
@@ -48,13 +48,15 @@ state.mkdir(parents=True,exist_ok=True)
 overrides=dict(x.split('=',1) for x in a.tool)
 known=['python3','tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip','gdu','dust-du','dua','bat','rg','fd','eza']
 runtime={}
+# Never resolve a dependency through a managed wrapper, including when upgrading.
+managed_bin=(base/'current'/'bin').resolve()
+search_path=os.pathsep.join(entry for entry in os.environ.get('PATH','').split(os.pathsep) if entry and Path(entry).resolve()!=managed_bin)
 for name in known:
     candidate=overrides.get(name)
     if not candidate and name not in ['gdu','dust-du']:
-        candidate=shutil.which(name)
-        if candidate and 'bio-cli/current' in candidate:candidate=None
+        candidate=shutil.which(name,path=search_path)
     if not candidate and a.tools_dir and (a.tools_dir/name).is_file():candidate=str((a.tools_dir/name).absolute())
-    if not candidate:candidate=shutil.which(name)
+    if not candidate:candidate=shutil.which(name,path=search_path)
     if not candidate:raise SystemExit('Missing dependency before installation: '+name)
     candidate=str(Path(candidate).absolute())
     if not os.access(candidate,os.X_OK):raise SystemExit('Not executable: '+candidate)

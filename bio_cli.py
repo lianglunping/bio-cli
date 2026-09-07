@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 import zipfile
 
-VERSION = '0.1.1'
+VERSION = '0.1.2'
 LIMIT = 1024 * 1024
 INDEX = ('.bai', '.csi', '.tbi', '.gzi', '.0123', '.bwt.2bit.64', '.pac', '.bwt', '.sa')
 SPECIAL = ('.bw', '.bigwig', '.bb', '.bigbed', '.h5', '.hdf5', '.h5ad', '.rds', '.rdata', '.rda')
