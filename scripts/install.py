@@ -63,7 +63,7 @@ for name in known:
 versions={}
 for name in known:
     flag='--version' if name!='gdu' else '--version'
-    r=subprocess.run([runtime[name],flag],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=15)
+    r=subprocess.run([runtime[name],flag],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=15)
     if r.returncode:raise SystemExit('Version probe failed: '+name)
     versions[name]={'path':runtime[name],'version':r.stdout.decode('utf-8','replace').splitlines()[:3]}
 if not release.exists():
