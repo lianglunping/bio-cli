@@ -1,0 +1,123 @@
+{
+  "darwin-arm64": [
+    {
+      "command": "gdu",
+      "repo": "dundee/gdu",
+      "release": "v5.37.0",
+      "asset": "gdu_darwin_arm64.tgz",
+      "url": "https://github.com/dundee/gdu/releases/download/v5.37.0/gdu_darwin_arm64.tgz",
+      "sha256": "9141cd08df9266b497babcfe84ba08eb28645ea568c113f5cc9d1b125f08dcf3",
+      "member": "gdu_darwin_arm64"
+    },
+    {
+      "command": "dust-du",
+      "repo": "bootandy/dust",
+      "release": "v1.2.5",
+      "asset": "dust-v1.2.5-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/bootandy/dust/releases/download/v1.2.5/dust-v1.2.5-aarch64-apple-darwin.tar.gz",
+      "sha256": "7f17449fecff70cce61e6060fac490dfe66b1b40ee1639bc1f72d121b846e364",
+      "member": "dust"
+    },
+    {
+      "command": "dua",
+      "repo": "Byron/dua-cli",
+      "release": "v2.44.0",
+      "asset": "dua-v2.44.0-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/Byron/dua-cli/releases/download/v2.44.0/dua-v2.44.0-aarch64-apple-darwin.tar.gz",
+      "sha256": "a2e966148ff586d5187aa9c5ce3729b5b3b4275cbebb9790313253ef35b91e23",
+      "member": "dua"
+    },
+    {
+      "command": "bat",
+      "repo": "sharkdp/bat",
+      "release": "v0.26.1",
+      "asset": "bat-v0.26.1-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-aarch64-apple-darwin.tar.gz",
+      "sha256": "e30beff26779c9bf60bb541e1d79046250cb74378f2757f8eb250afddb19e114",
+      "member": "bat"
+    },
+    {
+      "command": "rg",
+      "repo": "BurntSushi/ripgrep",
+      "release": "15.2.0",
+      "asset": "ripgrep-15.2.0-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-apple-darwin.tar.gz",
+      "sha256": "3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4",
+      "member": "rg"
+    },
+    {
+      "command": "fd",
+      "repo": "sharkdp/fd",
+      "release": "v10.5.0",
+      "asset": "fd-v10.5.0-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/sharkdp/fd/releases/download/v10.5.0/fd-v10.5.0-aarch64-apple-darwin.tar.gz",
+      "sha256": "b67e1836c468e42e411984b56e52fa7abec08c2bd22c867398e7cc134aac5e12",
+      "member": "fd"
+    }
+  ],
+  "linux-x86_64": [
+    {
+      "command": "gdu",
+      "repo": "dundee/gdu",
+      "release": "v5.37.0",
+      "asset": "gdu_linux_amd64_static.tgz",
+      "url": "https://github.com/dundee/gdu/releases/download/v5.37.0/gdu_linux_amd64_static.tgz",
+      "sha256": "dfd19216393c73cd2e54823092ef8471fd49f028c8258d9861796a82856aca08",
+      "member": "gdu_linux_amd64_static"
+    },
+    {
+      "command": "dust-du",
+      "repo": "bootandy/dust",
+      "release": "v1.2.5",
+      "asset": "dust-v1.2.5-x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/bootandy/dust/releases/download/v1.2.5/dust-v1.2.5-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "79813b5743fab1e04c1d9c34042aab865dbe09efb76719e7c7d260568850fabc",
+      "member": "dust"
+    },
+    {
+      "command": "dua",
+      "repo": "Byron/dua-cli",
+      "release": "v2.44.0",
+      "asset": "dua-v2.44.0-x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/Byron/dua-cli/releases/download/v2.44.0/dua-v2.44.0-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "e2219f722f93fbe7069df282f2bf33e7a524292ef43ca5fe27b25cf3fe158a3d",
+      "member": "dua"
+    },
+    {
+      "command": "bat",
+      "repo": "sharkdp/bat",
+      "release": "v0.26.1",
+      "asset": "bat-v0.26.1-x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "0dcd8ac79732c0d5b136f11f4ee00e581440e16a44eab5b3105b611bbf2cf191",
+      "member": "bat"
+    },
+    {
+      "command": "rg",
+      "repo": "BurntSushi/ripgrep",
+      "release": "15.2.0",
+      "asset": "ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
+      "member": "rg"
+    },
+    {
+      "command": "fd",
+      "repo": "sharkdp/fd",
+      "release": "v10.5.0",
+      "asset": "fd-v10.5.0-x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/sharkdp/fd/releases/download/v10.5.0/fd-v10.5.0-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "761c72dc8e120d85b22292063be8a796e2eeb20eb3e4f38b8fa2343ccf3514a7",
+      "member": "fd"
+    },
+    {
+      "command": "eza",
+      "repo": "eza-community/eza",
+      "release": "v0.23.5",
+      "asset": "eza_x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/eza-community/eza/releases/download/v0.23.5/eza_x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "e06eebab74b73d6b7d51a796a353824b001bea82df077706382e100815d28904",
+      "member": "eza"
+    }
+  ]
+}
