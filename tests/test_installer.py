@@ -32,6 +32,10 @@ class InstallerRegression(unittest.TestCase):
                     proc.kill();proc.communicate();self.fail('Version probe waited on inherited stdin')
                 out,err=proc.communicate();self.assertEqual(proc.returncode,0,err.decode());return json.loads(out)
             first=run()
+            help_output=subprocess.check_output([str(prefix/'bin/peek'),'--help'],env=env,timeout=5).decode()
+            self.assertTrue(help_output.startswith('usage: peek '))
+            self.assertIn('peek annotation.gff3.gz',help_output)
+            self.assertNotIn('{peek,packz,unpackz}',help_output)
             first_runtime=json.loads((Path(first['release'])/'runtime.json').read_text())
             self.assertEqual(first['tools']['zstd']['path'],first_runtime['zstd'])
             env['PATH']=str(prefix/'share/bio-cli/current/bin')+os.pathsep+str(prefix/'bin')+os.pathsep+env['PATH']

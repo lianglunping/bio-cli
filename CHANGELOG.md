@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+- Show command-specific usage instead of internal Python invocation details.
+- Add Chinese option descriptions, bioinformatics examples, format boundaries and pager instructions to peek help.
+- Add concise compression/recovery examples and clarify root/subcommand help routing.
+- Replace per-character Python escaping with a compiled control-character scan, preserving Unicode and whitespace behavior.
+
 ## 0.1.3
 
 - Resolve managed dependency aliases during upgrades and reuse their real executables.

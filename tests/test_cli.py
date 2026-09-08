@@ -33,6 +33,17 @@ class Acceptance(unittest.TestCase):
         return p
     def put(self,name,data=None):
         f=self.p/name; f.write_bytes(self.text if data is None else data); return f
+    def test_help_and_command_routing(self):
+        for name in ['peek','packz','unpackz']:
+            text=self.runcli(name,'--help').stdout.decode()
+            self.assertTrue(text.startswith('usage: '+name+' '))
+            self.assertNotIn('{peek,packz,unpackz}',text)
+            self.assertIn('示例',text)
+            self.assertIn(b'bio-cli ',self.runcli(name,'--version').stdout)
+        self.assertIn(b'peek',self.runcli('--help').stdout)
+        self.runcli('unknown',ok=False)
+        source=self.put('-synthetic.fa')
+        self.assertEqual(self.runcli('peek','--',source).stdout,self.text)
     def test_text_formats_and_magic_compression(self):
         for name in ['synthetic.fa','synthetic.fastq','synthetic.gff3','synthetic.gtf','synthetic.bed','synthetic.vcf','synthetic.g.vcf','synthetic.fai','synthetic.dict','synthetic.tsv','synthetic.ann','synthetic.amb']:
             for suffix, encode in [('',lambda x:x),('.gz',gzip.compress),('.bz2',bz2.compress),('.xz',lzma.compress)]:
@@ -51,6 +62,10 @@ class Acceptance(unittest.TestCase):
     def test_terminal_escape(self):
         r=self.runcli('peek',self.put('synthetic.txt',b'hello\x1b[2J\n'))
         self.assertNotIn(b'\x1b',r.stdout)
+    def test_control_escape_preserves_unicode_and_whitespace(self):
+        data='水稻\tACGT\n\r\x1b\x7f\u0085\u009f\u00a0'.encode()+b'\xff'
+        expected='水稻\tACGT\n\\x0d\\x1b\\x7f\\x85\\x9f\u00a0\ufffd'.encode()
+        self.assertEqual(self.runcli('peek',self.put('synthetic-controls.txt',data)).stdout,expected)
     def test_metadata_and_error_filename_escape(self):
         for suffix in ['.bai', '.h5ad']:
             r=self.runcli('peek',self.put('synthetic-\x1b[2J'+suffix,b'\x00'))

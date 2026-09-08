@@ -35,6 +35,33 @@ BAI/CSI/TBI/GZI、BWA/BWA-MEM2 的 PAC/BWT/SA/0123/BWT.2bit.64 索引只显示�
 
 `unpackz` 支持 gzip/BGZF、zstd、xz、bzip2 单文件及上述 tar 归档。ZIP 仅预览，不解包。拒绝覆盖目标；目录恢复要求新的目标目录。绝对路径、`..`、逃逸符号链接和特殊设备成员被拒绝。正常内部符号链接与已出现目标的硬链接可恢复；前向硬链接拒绝。失败的恢复目录保留 `.bio-cli-incomplete` 标志。保留常规权限、文件修改时间及内部链接；不保证 ACL、扩展属性、资源叉、所有者或文件系统快照语义。单文件压缩只保留内容，不保存原权限与时间。
 
+## peek 参数与场景
+
+运行 `peek --help` 可在终端直接查看中文说明和示例，无需额外输入 `peek` 子命令或 Python 脚本名。
+
+| 目的 | 命令示例 | 说明 |
+|---|---|---|
+| 预览注释 | `peek annotation.gff3.gz` | 直接读取压缩内容；同样支持 GTF |
+| 预览参考序列 | `peek -n 30 reference.fa.gz` | 前 30 行，可能包含跨行序列的一部分 |
+| 预览测序数据 | `peek -n 20 reads.fastq.gz` | 标准四行 FASTQ 且未触及字节上限时为 5 条记录 |
+| 预览变异 | `peek -n 50 variants.vcf.gz` | 元信息、表头均计入 50 行，并非 50 个变异 |
+| 查看比对头部 | `peek --header alignments.bam` | 仍受行数与字节上限限制 |
+| 查看 CRAM 记录 | `peek --reference reference.fa alignments.cram` | 要求本地参考及已有的 reference.fa.fai |
+| 查看 BCF | `peek variants.bcf` | 由 bcftools 输出 VCF 文本 |
+| 查看压缩包目录 | `peek -n 10 archive.tar.zst` | 列出前 10 个成员，不解包到磁盘 |
+| 限制预览大小 | `peek --max-bytes 65536 large.tsv.zst` | 设置 64 KiB 上限，参数填写整数 |
+| 直接输出 | `peek --no-pager table.tsv` | 不进入分页器；管道也自动禁用分页 |
+| 文件名含空格 | `peek "sample notes.tsv"` | 使用引号 |
+| 文件名以短横线开头 | `peek -- -sample.fa` | 用 `--` 结束选项解析 |
+
+分页器中按 `q` 退出、`/` 搜索、空格翻页。`--header` 只适用于 BAM/CRAM/BCF，文本格式使用 `-n`。二进制索引显示元数据属于预期行为，不表示文件损坏。
+
+## 性能设计
+
+Python 负责命令入口、限量预览、终端转义和安全恢复；压缩与专用格式读取调用原生 zstd/gzip/bgzip、samtools/bcftools。压缩过程中不使用 Python 逐字节执行压缩算法，目录打包的 tar 输出直接交给压缩器。
+
+性能取决于启动开销、解压吞吐、存储速度、归档成员位置和安全检查。文本转义使用编译后的控制字符扫描，避免对普通文本逐字符执行 Python 循环。目录恢复仍包含 Python tar 解析和逐成员路径检查，海量小文件与反复启动进程的批处理可能受其影响；不能把本工具视为原生命令的零开销替代品。全量重写需先用同一数据和同等校验要求比较，不能只凭实现语言预测提速。
+
 ## 安装
 
 依赖：`python3`, `tar`, `gzip`, `bzip2`, `xz`, `zstd`, `samtools`, `bcftools`, `bgzip`。完整工具组合另含 `gdu`, `dust-du`, `dua`, `bat`, `rg`, `fd`, `eza`。本项目不执行系统级包安装，不修改 Conda base，不替换传统 `du/cat/ls`。

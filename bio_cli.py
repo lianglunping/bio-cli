@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import signal
@@ -15,11 +16,12 @@ import tarfile
 import tempfile
 import zipfile
 
-VERSION = '0.1.3'
+VERSION = '0.1.4'
 LIMIT = 1024 * 1024
 INDEX = ('.bai', '.csi', '.tbi', '.gzi', '.0123', '.bwt.2bit.64', '.pac', '.bwt', '.sa')
 SPECIAL = ('.bw', '.bigwig', '.bb', '.bigbed', '.h5', '.hdf5', '.h5ad', '.rds', '.rdata', '.rda')
 ARCHIVES = ('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz', '.tar.zst', '.tzst')
+CONTROLS = re.compile(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]')
 
 class Error(Exception):
     pass
@@ -101,7 +103,8 @@ def reader(path, command=None, env=None):
 def safe_text(data):
     # Escape terminal controls while preserving tabs, newlines and UTF-8.
     text = data.decode('utf-8', 'replace')
-    return ''.join(c if c in '\n\t' or (ord(c) >= 32 and not 127 <= ord(c) < 160) else '\\x%02x' % ord(c) for c in text)
+    # Scan ordinary text in the regex engine; Python runs only for controls found.
+    return CONTROLS.sub(lambda match: '\\x%02x' % ord(match.group()), text)
 
 
 def preview_stream(r, lines, byte_limit):
@@ -335,31 +338,83 @@ def positive(value):
     return n
 
 
+PEEK_EXAMPLES = """常用示例（文件名均为示例，请替换为自己的文件）：
+  peek annotation.gff3.gz                 查看压缩的 GFF3 注释
+  peek -n 30 reference.fa.gz              查看 FASTA 的前 30 行
+  peek -n 20 reads.fastq.gz               查看 FASTQ 的前 20 行
+  peek -n 50 variants.vcf.gz              查看 VCF 开头，包含元信息和表头
+  peek reference.fa.fai                   查看参考序列的文本索引
+  peek reference.fa.bwt.2bit.64           二进制索引只显示元数据
+  peek --header alignments.bam           只看 BAM 头部
+  peek -n 50 alignments.bam               查看 BAM 头部及后续比对记录
+  peek variants.bcf                      将 BCF 转成 VCF 文本预览
+  peek --header alignments.cram          只看 CRAM 头部，不需要参考文件
+  peek --reference reference.fa alignments.cram
+                                        用本地参考预览 CRAM（需已有 .fai）
+  peek -n 10 archive.tar.zst              列出归档前 10 个成员，不解包
+  peek --max-bytes 65536 large.tsv.zst    最多读取 64 KiB 预览内容
+  peek --no-pager annotation.gtf.gz      直接输出，不进入分页器
+  peek --no-pager table.tsv | head -10   将预览结果交给其他命令
+  peek "sample notes.tsv"                含空格的文件名加引号
+  peek -- -sample.fa                     以短横线开头的文件名先加 --
+
+格式与边界：
+  文本：FASTA/FASTQ、GFF/GFF3/GTF、BED/WIG、VCF/gVCF、SAM、TSV/CSV、
+        MTX、FAI/DICT、文本 ANN/AMB；支持 gzip/BGZF、zstd、xz、bzip2。
+  BAM/CRAM 依赖 samtools，BCF 依赖 bcftools；归档支持 tar 变体和 ZIP。
+  BAI/CSI/TBI/GZI、BWA/BWA-MEM2 二进制索引仅显示元数据；
+  BigWig/BigBed、HDF5/H5AD、RDS/RData 仅标识类别，不展开对象。
+  默认上限为 200 行或 1 MiB，先达到者为准；长行可能被截断。
+  -n 是物理行数，不是序列、read 或变异数；FASTQ 20 行仅在标准四行格式
+  且未触及字节上限时对应 5 条记录。BAM/VCF 的头部也占用行数。
+  归档中 -n 是成员数，--max-bytes 限制列表输出；寻找后续成员仍需扫描。
+  预览不会修改源文件或自动建索引，也不能代替全文件完整性检查。
+  分页器内按 q 退出，/ 搜索，空格翻页；管道输出自动禁用分页。
+"""
+
+
+def configure_command(parser, command):
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
+    parser.description = {
+        'peek': '快速、限量预览生信文件：无需先将压缩文本解压到磁盘。',
+        'packz': '压缩文件或打包目录；保留源文件，拒绝覆盖已有输出。',
+        'unpackz': '恢复压缩文件或 tar 归档；目标必须是新文件或新目录。',
+    }[command]
+    parser.add_argument('--version', action='version', version='bio-cli ' + VERSION)
+    if command == 'peek':
+        parser.add_argument('-n', '--lines', type=positive, default=200, metavar='N', help='最多预览 N 行；归档为 N 个成员（默认：200）')
+        parser.add_argument('--max-bytes', type=positive, default=LIMIT, metavar='BYTES', help='预览字节上限，填写正整数（默认：1048576，即 1 MiB）')
+        parser.add_argument('--no-pager', action='store_true', help='直接输出到终端；用于重定向或管道时可显式指定')
+        parser.add_argument('--header', action='store_true', help='仅显示 BAM/CRAM/BCF 头部，仍受行数和字节上限限制')
+        parser.add_argument('--reference', metavar='FASTA', help='CRAM 记录预览所需的本地参考；必须已有 FASTA.fai')
+        parser.epilog = PEEK_EXAMPLES
+    elif command == 'packz':
+        parser.add_argument('--format', choices=['zstd', 'gzip', 'bgzip'], default='zstd', help='压缩格式（默认：zstd）；目录只支持 zstd')
+        parser.add_argument('-t', '--threads', type=positive, default=2, help='工作线程数（默认：2；gzip 始终单线程）')
+        parser.add_argument('-l', '--level', type=int, choices=range(1, 20), default=3, help='压缩级别（默认：3）；gzip/BGZF 高于 9 时按 9 使用')
+        parser.add_argument('-o', '--output', help='指定新输出文件；默认在源文件旁添加 .zst/.gz 或 .tar.zst')
+        parser.epilog = '示例：\n  packz table.tsv\n  packz project_directory\n  packz --format bgzip variants.vcf\n  packz -t 2 -l 6 -o archive.tar.zst project_directory'
+    elif command == 'unpackz':
+        parser.add_argument('-C', '--directory', help='tar 归档恢复到此新目录；目录必须不存在')
+        parser.add_argument('-o', '--output', help='单文件恢复的目标文件；默认去掉压缩后缀')
+        parser.epilog = '示例：\n  unpackz table.tsv.zst -o restored.tsv\n  unpackz archive.tar.zst -C restored_project\n\nZIP 仅支持 peek 列表预览，不支持 unpackz 解包。'
+    parser.add_argument('input', metavar='FILE' if command != 'packz' else 'PATH', help='待处理的文件' if command != 'packz' else '待压缩的文件或目录')
+
+
 def main():
     invoked = Path(sys.argv[0]).name
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--version', action='version', version='bio-cli ' + VERSION)
-    if invoked in ('peek', 'packz', 'unpackz'):
-        command = invoked
+    commands = ('peek', 'packz', 'unpackz')
+    if invoked in commands:
+        parser = argparse.ArgumentParser(prog=invoked)
+        configure_command(parser, invoked)
     else:
-        parser.add_argument('command', choices=['peek', 'packz', 'unpackz'])
-        command = sys.argv[1] if len(sys.argv) > 1 else ''
-    if command == 'peek':
-        parser.add_argument('-n', '--lines', type=positive, default=200)
-        parser.add_argument('--max-bytes', type=positive, default=LIMIT)
-        parser.add_argument('--no-pager', action='store_true')
-        parser.add_argument('--header', action='store_true')
-        parser.add_argument('--reference')
-    elif command == 'packz':
-        parser.add_argument('--format', choices=['zstd', 'gzip', 'bgzip'], default='zstd')
-        parser.add_argument('-t', '--threads', type=positive, default=2)
-        parser.add_argument('-l', '--level', type=int, choices=range(1, 20), default=3)
-        parser.add_argument('-o', '--output')
-    elif command == 'unpackz':
-        parser.add_argument('-C', '--directory')
-        parser.add_argument('-o', '--output')
-    parser.add_argument('input')
+        parser = argparse.ArgumentParser(prog='bio-cli', description='生信文件预览、压缩与恢复工具；各命令使用 --help 查看示例。')
+        parser.add_argument('--version', action='version', version='bio-cli ' + VERSION)
+        subparsers = parser.add_subparsers(dest='command', required=True)
+        for name in commands:
+            configure_command(subparsers.add_parser(name, prog=name), name)
     args = parser.parse_args()
+    command = invoked if invoked in commands else args.command
     try:
         {'peek': peek, 'packz': pack, 'unpackz': unpack}[command](args)
         return 0
