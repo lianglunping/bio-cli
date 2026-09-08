@@ -32,14 +32,37 @@ class InstallerRegression(unittest.TestCase):
                     proc.kill();proc.communicate();self.fail('Version probe waited on inherited stdin')
                 out,err=proc.communicate();self.assertEqual(proc.returncode,0,err.decode());return json.loads(out)
             first=run()
-            env['PATH']=str(prefix/'share/bio-cli/current/bin')+os.pathsep+env['PATH']
+            first_runtime=json.loads((Path(first['release'])/'runtime.json').read_text())
+            self.assertEqual(first['tools']['zstd']['path'],first_runtime['zstd'])
+            env['PATH']=str(prefix/'share/bio-cli/current/bin')+os.pathsep+str(prefix/'bin')+os.pathsep+env['PATH']
+            # Upgrade without staging: prefix/bin/dust-du must resolve to its real dependency.
+            pos=command.index('--tools-dir');del command[pos:pos+2]
             (source/'VERSION').write_text('0.0.99\n')
             second=run();self.assertNotEqual(first['release_id'],second['release_id'])
             runtime=json.loads((Path(second['release'])/'runtime.json').read_text())
             self.assertFalse(any('current/bin' in value for value in runtime.values()))
-            r=subprocess.run([str(prefix/'share/bio-cli/current/bin/zstd'),'--version'],input=b'',capture_output=True,timeout=3)
-            self.assertEqual(r.returncode,0)
+            self.assertNotEqual(runtime['dust-du'],str(prefix/'bin/dust-du'))
+            for name in ['zstd','dust-du']:
+                r=subprocess.run([str(prefix/'share/bio-cli/current/bin'/name),'--version'],input=b'',capture_output=True,timeout=3)
+                self.assertEqual(r.returncode,0)
             self.assertEqual(shell.read_text().count('# bio-cli: managed PATH entry'),1)
             run();self.assertEqual(shell.read_text().count('# bio-cli: managed PATH entry'),1)
+            # Conflicting configuration must fail before changing an installed release.
+            replacement=p/'replacement-zstd'
+            replacement.write_text('#!/bin/sh\nprintf "replacement tool\\n"\n');replacement.chmod(0o755)
+            current=prefix/'share/bio-cli/current'
+            original_target=os.readlink(current)
+            original_config=(current/'runtime.json').read_bytes()
+            rejected=subprocess.run(command+['--tool','zstd='+str(replacement)],env=env,input=b'',capture_output=True,timeout=10)
+            self.assertNotEqual(rejected.returncode,0)
+            self.assertIn(b'Existing release uses a different dependency',rejected.stderr)
+            self.assertEqual(os.readlink(current),original_target)
+            self.assertEqual((current/'runtime.json').read_bytes(),original_config)
+            receipt=json.loads((prefix/'state/bio-cli'/('install-'+second['release_id'])/'installation.json').read_text())
+            self.assertEqual(receipt['tools']['zstd']['path'],runtime['zstd'])
+            rejected=subprocess.run(command+['--tool','dust-du='+str(prefix/'bin/dust-du')],env=env,input=b'',capture_output=True,timeout=10)
+            self.assertNotEqual(rejected.returncode,0)
+            self.assertIn(b'Managed wrapper is not a dependency',rejected.stderr)
+            self.assertEqual(os.readlink(current),original_target)
 
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -48,19 +48,48 @@ state.mkdir(parents=True,exist_ok=True)
 overrides=dict(x.split('=',1) for x in a.tool)
 known=['python3','tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip','gdu','dust-du','dua','bat','rg','fd','eza']
 runtime={}
-# Never resolve a dependency through a managed wrapper, including when upgrading.
-managed_bin=(base/'current'/'bin').resolve()
-search_path=os.pathsep.join(entry for entry in os.environ.get('PATH','').split(os.pathsep) if entry and Path(entry).resolve()!=managed_bin)
+# Inspect executable targets, not just PATH entries: prefix/bin also links here.
+def managed_wrapper(value):
+    resolved=Path(value).resolve()
+    return (resolved.parent==(base/'current'/'bin').resolve() or
+            (resolved.parent.name=='bin' and resolved.parent.parent.parent==(base/'releases').resolve()))
+
+old_config=base/'current'/'runtime.json'
+old_runtime=json.loads(old_config.read_text()) if old_config.is_file() else {}
+def previous_dependency(name):
+    value=old_runtime.get(name)
+    return value if value and not managed_wrapper(value) and os.access(value,os.X_OK) else None
+
+def find_dependency(name):
+    for entry in os.environ.get('PATH','').split(os.pathsep):
+        if not entry:continue
+        candidate=Path(entry)/name
+        if candidate.is_file() and os.access(candidate,os.X_OK):
+            if not managed_wrapper(candidate):return str(candidate.absolute())
+            previous=previous_dependency(name)
+            if previous:return previous
+    return previous_dependency(name)
+
 for name in known:
     candidate=overrides.get(name)
     if not candidate and name not in ['gdu','dust-du']:
-        candidate=shutil.which(name,path=search_path)
+        candidate=find_dependency(name)
     if not candidate and a.tools_dir and (a.tools_dir/name).is_file():candidate=str((a.tools_dir/name).absolute())
-    if not candidate:candidate=shutil.which(name,path=search_path)
+    if not candidate:candidate=find_dependency(name)
     if not candidate:raise SystemExit('Missing dependency before installation: '+name)
     candidate=str(Path(candidate).absolute())
+    if managed_wrapper(candidate):raise SystemExit('Managed wrapper is not a dependency: '+name)
     if not os.access(candidate,os.X_OK):raise SystemExit('Not executable: '+candidate)
     runtime[name]=candidate
+# An existing release is immutable. Never report new overrides while running old ones.
+if release.exists():
+    installed=json.loads((release/'runtime.json').read_text())
+    for name,value in overrides.items():
+        if name not in installed or Path(value).resolve()!=Path(installed[name]).resolve():
+            raise SystemExit('Existing release uses a different dependency: '+name+'; choose a new personal --prefix')
+    runtime=installed
+    if any(managed_wrapper(value) for value in runtime.values()):
+        raise SystemExit('Existing release contains a managed dependency wrapper')
 # Check executability before creating an active release.
 versions={}
 for name in known:
@@ -78,8 +107,8 @@ if not release.exists():
             if Path(runtime[name]).parent==a.tools_dir.absolute():
                 out=release/'vendor'/name;out.parent.mkdir(exist_ok=True);shutil.copy2(runtime[name],out);runtime[name]=str(out)
     (release/'runtime.json').write_text(json.dumps(runtime,indent=2)+'\n')
-else:
-    runtime=json.loads((release/'runtime.json').read_text())
+# Record the paths actually used, including binaries copied into this release.
+for name in known:versions[name]['path']=runtime[name]
 binpath=release/'bin';binpath.mkdir(exist_ok=True)
 for name in ['peek','packz','unpackz']:
     # Use subcommand form so argv[0] need not rely on symlink resolution.

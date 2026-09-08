@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 import zipfile
 
-VERSION = '0.1.2'
+VERSION = '0.1.3'
 LIMIT = 1024 * 1024
 INDEX = ('.bai', '.csi', '.tbi', '.gzi', '.0123', '.bwt.2bit.64', '.pac', '.bwt', '.sa')
 SPECIAL = ('.bw', '.bigwig', '.bb', '.bigbed', '.h5', '.hdf5', '.h5ad', '.rds', '.rdata', '.rda')
@@ -138,7 +138,7 @@ def peek(args):
     path = regular(args.input)
     name = path.name.lower()
     if name.endswith(INDEX + SPECIAL):
-        print('Metadata only: %s\nSize: %d bytes\nClass: %s' % (path.name, path.stat().st_size, 'binary index' if name.endswith(INDEX) else 'specialized binary format'))
+        print(safe_text(('Metadata only: %s\nSize: %d bytes\nClass: %s' % (path.name, path.stat().st_size, 'binary index' if name.endswith(INDEX) else 'specialized binary format')).encode('utf-8', 'replace')))
         return
     if name.endswith('.zip'):
         with zipfile.ZipFile(path) as z:
@@ -159,6 +159,10 @@ def peek(args):
                     if i >= args.lines or len(result) + len(row) > args.max_bytes:
                         r.truncated = truncated = True; break
                     result.extend(row)
+                    # Asking for the next header skips the current member's payload.
+                    # Stop now, before a large FASTQ/BAM is read just to discover N+1.
+                    if i + 1 >= args.lines or len(result) >= args.max_bytes:
+                        r.truncated = truncated = True; break
             # tar end markers can precede a compressed checksum; drain to verify it.
             if not r.truncated:
                 while r.stream.read(65536): pass
@@ -364,7 +368,7 @@ def main():
     except KeyboardInterrupt:
         print('Interrupted; source data unchanged', file=sys.stderr); return 130
     except (Error, OSError, ValueError, tarfile.TarError, zipfile.BadZipFile, EOFError) as exc:
-        print(command + ': ' + str(exc), file=sys.stderr); return 2
+        print(safe_text((command + ': ' + str(exc)).encode('utf-8', 'replace')), file=sys.stderr); return 2
 
 if __name__ == '__main__':
     sys.exit(main())

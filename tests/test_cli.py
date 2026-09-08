@@ -1,6 +1,9 @@
 """Synthetic-only behavioral acceptance tests; no research data required."""
 import bz2
+import argparse
+import contextlib
 import gzip
+import importlib.util
 import hashlib
 import io
 import lzma
@@ -48,6 +51,40 @@ class Acceptance(unittest.TestCase):
     def test_terminal_escape(self):
         r=self.runcli('peek',self.put('synthetic.txt',b'hello\x1b[2J\n'))
         self.assertNotIn(b'\x1b',r.stdout)
+    def test_metadata_and_error_filename_escape(self):
+        for suffix in ['.bai', '.h5ad']:
+            r=self.runcli('peek',self.put('synthetic-\x1b[2J'+suffix,b'\x00'))
+            self.assertNotIn(b'\x1b',r.stdout)
+            self.assertIn(b'\\x1b',r.stdout)
+        r=self.runcli('peek',self.p/'missing-\x1b[2J.txt',ok=False)
+        self.assertNotIn(b'\x1b',r.stderr)
+        self.assertIn(b'\\x1b',r.stderr)
+    def test_tar_preview_stops_before_large_payload(self):
+        spec=importlib.util.spec_from_file_location('preview_module',CLI)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        archive=self.p/'synthetic.tar'
+        with tarfile.open(archive,'w') as tf:
+            info=tarfile.TarInfo('large.fa');info.size=8*1024*1024
+            tf.addfile(info,io.BytesIO(b'A'*info.size))
+            tf.addfile(tarfile.TarInfo('second.txt'),io.BytesIO())
+        count=[0]
+        class Counted:
+            def __init__(self,stream):self.stream=stream
+            def read(self,n=-1):
+                data=self.stream.read(n);count[0]+=len(data);return data
+            def __getattr__(self,name):return getattr(self.stream,name)
+        original=module.reader
+        @contextlib.contextmanager
+        def counted(*args,**kwargs):
+            with original(*args,**kwargs) as r:
+                r.stream=Counted(r.stream);yield r
+        module.reader=counted
+        output=io.StringIO();errors=io.StringIO()
+        with contextlib.redirect_stdout(output),contextlib.redirect_stderr(errors):
+            module.peek(argparse.Namespace(input=archive,lines=1,max_bytes=1024,no_pager=True))
+        self.assertEqual(output.getvalue(),'8388608\tlarge.fa\n')
+        self.assertLess(count[0],65536)
+        self.assertIn('limit reached',errors.getvalue())
     def test_missing_bad_and_truncated(self):
         self.runcli('peek',self.p/'missing.gz',ok=False)
         bad=self.put('broken.gz',gzip.compress(self.text)[:-5])

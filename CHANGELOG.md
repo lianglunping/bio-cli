@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+- Resolve managed dependency aliases during upgrades and reuse their real executables.
+- Reject conflicting same-release dependency overrides; record effective runtime paths.
+- Stop tar previews at the requested entry count before reading the last entry's payload.
+- Escape terminal controls in binary metadata names and reported errors.
+- Add regression tests for alternate wrapper paths, immutable configuration and bounded tar reads.
+
 ## 0.1.2
 
 - Exclude the active managed wrapper directory when resolving dependencies during upgrades.

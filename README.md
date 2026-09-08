@@ -53,6 +53,10 @@ python3 scripts/install.py --tools-dir "$HOME/tool_staging/bin" --shell-file "$H
 
 ## 验证与回退
 
+升级会识别 `current/bin` 和个人 `bin` 中的托管入口，复用其真实依赖，避免包装器调用自身。同一源码 release 的运行配置保持固定；重装时显式指定与已安装配置不同的 `--tool` 会报错，应使用新的个人 `--prefix`。安装记录中的依赖路径对应实际运行配置，包括安装器复制的 vendor 文件。
+
+tar 目录预览达到请求的条数后立即停止，不为寻找下一条记录而读完当前文件载荷；因此即使归档恰好只有这些条目，也会提示预览上限。查看更靠后的成员仍需要扫描前面的载荷，`--max-bytes` 限制输出而非所有输入 I/O。完整校验需单独执行。
+
 ```sh
 python3 -m unittest discover -s tests -v
 peek --version
