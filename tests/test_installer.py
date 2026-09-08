@@ -75,6 +75,27 @@ class InstallerRegression(unittest.TestCase):
             self.assertEqual(os.readlink(current),original_target)
 
 class InstallerTransactions(unittest.TestCase):
+    def test_portable_lock_is_exclusive_and_released(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('lock_installer',ROOT/'scripts/install.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix='bio-cli-lock-test-') as tmp:
+            base=Path(tmp)
+            with module.install_lock(base):
+                owner=json.loads((base/'install.lock.d/owner.json').read_text())
+                self.assertEqual(owner['pid'],os.getpid())
+                with self.assertRaises(ValueError):
+                    with module.install_lock(base):pass
+                self.assertTrue((base/'install.lock.d/owner.json').is_file())
+            self.assertFalse((base/'install.lock.d').exists())
+            with self.assertRaises(RuntimeError):
+                with module.install_lock(base):raise RuntimeError('synthetic failure')
+            self.assertFalse((base/'install.lock.d').exists())
+            (base/'install.lock.d').mkdir()
+            with self.assertRaises(ValueError):
+                with module.install_lock(base):pass
+            self.assertTrue((base/'install.lock.d').is_dir())
+
     def test_build_failure_retry_and_activation_rollback(self):
         import argparse
         import importlib.util

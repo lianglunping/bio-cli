@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6
+
+- Use an atomic directory lock for installation on shared filesystems without flock/lockf support.
+- Reject concurrent installation with an owner record; never automatically steal a stale lock.
+- Preserve v0.1.5 failure evidence and add lock ownership/release regression coverage.
+
 ## 0.1.5
 
 - Preflight directory members against the safe restore policy before publishing archives.

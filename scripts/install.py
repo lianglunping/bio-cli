@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install in a personal prefix with staged releases and compensating rollback."""
 import argparse
-import fcntl
+import contextlib
 import hashlib
 import json
 import os
@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import socket
 
 FILES = ['bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py',
          'scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
@@ -46,10 +47,26 @@ def install(a):
     if prefix in [Path('/'), Path('/usr'), Path('/usr/local'), Path('/opt/homebrew')]:
         raise ValueError('Choose a personal installation prefix')
     base = prefix/'share/bio-cli'; base.mkdir(parents=True, exist_ok=True)
-    # Keep the lock inode stable. All installers for this prefix serialize here.
-    with (base/'install.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with install_lock(base):
         return install_locked(a, source, prefix, base)
+
+
+@contextlib.contextmanager
+def install_lock(base):
+    # Atomic mkdir works on shared filesystems that return ENOSYS for flock/lockf.
+    # Never guess whether a foreign/stale owner is dead and remove its lock.
+    lockdir = base/'install.lock.d'
+    try:
+        lockdir.mkdir(mode=0o700)
+    except FileExistsError:
+        raise ValueError('Installation lock already exists; inspect its owner and active installers before recovery: ' + str(lockdir))
+    owner = lockdir/'owner.json'
+    try:
+        owner.write_text(json.dumps({'pid':os.getpid(), 'host':socket.gethostname()})+'\n')
+        yield
+    finally:
+        if owner.exists(): owner.unlink()
+        lockdir.rmdir()
 
 
 def install_locked(a, source, prefix, base):
