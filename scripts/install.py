@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Install in a user-selected prefix; preserve unrelated executables and shell settings."""
+"""Install in a personal prefix with staged releases and compensating rollback."""
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -9,138 +10,230 @@ import shlex
 import shutil
 import subprocess
 import sys
-import time
+import tempfile
 
-p=argparse.ArgumentParser(description=__doc__)
-p.add_argument('--prefix',type=Path,default=Path.home()/'.local')
-p.add_argument('--tools-dir',type=Path,help='directory containing verified upstream executables')
-p.add_argument('--tool',action='append',default=[],help='explicit dependency mapping NAME=/absolute/path')
-p.add_argument('--shell-file',type=Path,help='optional shell file; backed up before adding one PATH block')
-a=p.parse_args()
-# Validate potential conflicts before changing any active installation.
-source=Path(__file__).resolve().parents[1]
-prefix=a.prefix.expanduser().absolute()
-if prefix in [Path('/'),Path('/usr'),Path('/usr/local'),Path('/opt/homebrew')]:
-    p.error('Choose a personal installation prefix')
-base_check=prefix/'share'/'bio-cli'
-current_check=base_check/'current'
-if (current_check.exists() or current_check.is_symlink()) and not current_check.is_symlink():
-    raise SystemExit('Unmanaged current directory; refusing replacement')
-for name in ['peek','packz','unpackz','dust-du']:
-    link=prefix/'bin'/name
-    if link.exists() or link.is_symlink():
-        if not link.is_symlink() or os.readlink(link)!=str(current_check/'bin'/name):
-            raise SystemExit('Unmanaged executable conflict: '+name)
-if a.shell_file and a.shell_file.exists():
-    text=a.shell_file.read_text()
-    line='export PATH='+shlex.quote(str(current_check/'bin'))+':"$PATH"'
-    if '# bio-cli: managed PATH entry' in text and line not in text:
-        raise SystemExit('Existing PATH marker differs; inspect manually')
-version=(source/'VERSION').read_text().strip()
-files=['bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
-h=hashlib.sha256()
-for file in files:h.update(file.encode());h.update((source/file).read_bytes())
-release_id=version+'-'+h.hexdigest()[:12]
-base=prefix/'share'/'bio-cli'
-release=base/'releases'/release_id
-state=prefix/'state'/'bio-cli'/('install-'+release_id)
-state.mkdir(parents=True,exist_ok=True)
-overrides=dict(x.split('=',1) for x in a.tool)
-known=['python3','tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip','gdu','dust-du','dua','bat','rg','fd','eza']
-runtime={}
-# Inspect executable targets, not just PATH entries: prefix/bin also links here.
-def managed_wrapper(value):
-    resolved=Path(value).resolve()
-    return (resolved.parent==(base/'current'/'bin').resolve() or
-            (resolved.parent.name=='bin' and resolved.parent.parent.parent==(base/'releases').resolve()))
+FILES = ['bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py',
+         'scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
+OWNED = ['peek','packz','unpackz','dust-du','bio-cli']
+KNOWN = ['python3','tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip',
+         'gdu','dust-du','dua','bat','rg','fd','eza']
+WRAPPED = ['gdu','dust-du','dua','bat','rg','fd','eza','zstd','samtools','bcftools','bgzip']
 
-old_config=base/'current'/'runtime.json'
-old_runtime=json.loads(old_config.read_text()) if old_config.is_file() else {}
-def previous_dependency(name):
-    value=old_runtime.get(name)
-    return value if value and not managed_wrapper(value) and os.access(value,os.X_OK) else None
 
-def find_dependency(name):
-    for entry in os.environ.get('PATH','').split(os.pathsep):
-        if not entry:continue
-        candidate=Path(entry)/name
-        if candidate.is_file() and os.access(candidate,os.X_OK):
-            if not managed_wrapper(candidate):return str(candidate.absolute())
-            previous=previous_dependency(name)
-            if previous:return previous
-    return previous_dependency(name)
+def atomic_text(path, text, mode=0o600):
+    fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w') as out:
+            out.write(text); out.flush(); os.fsync(out.fileno())
+        os.chmod(name, mode)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name): os.unlink(name)
 
-for name in known:
-    candidate=overrides.get(name)
-    if not candidate and name not in ['gdu','dust-du']:
-        candidate=find_dependency(name)
-    if not candidate and a.tools_dir and (a.tools_dir/name).is_file():candidate=str((a.tools_dir/name).absolute())
-    if not candidate:candidate=find_dependency(name)
-    if not candidate:raise SystemExit('Missing dependency before installation: '+name)
-    candidate=str(Path(candidate).absolute())
-    if managed_wrapper(candidate):raise SystemExit('Managed wrapper is not a dependency: '+name)
-    if not os.access(candidate,os.X_OK):raise SystemExit('Not executable: '+candidate)
-    runtime[name]=candidate
-# An existing release is immutable. Never report new overrides while running old ones.
-if release.exists():
-    installed=json.loads((release/'runtime.json').read_text())
-    for name,value in overrides.items():
-        if name not in installed or Path(value).resolve()!=Path(installed[name]).resolve():
-            raise SystemExit('Existing release uses a different dependency: '+name+'; choose a new personal --prefix')
-    runtime=installed
-    if any(managed_wrapper(value) for value in runtime.values()):
-        raise SystemExit('Existing release contains a managed dependency wrapper')
-# Check executability before creating an active release.
-versions={}
-for name in known:
-    flag='--version' if name!='gdu' else '--version'
-    r=subprocess.run([runtime[name],flag],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=15)
-    if r.returncode:raise SystemExit('Version probe failed: '+name)
-    versions[name]={'path':runtime[name],'version':r.stdout.decode('utf-8','replace').splitlines()[:3]}
-if not release.exists():
-    release.mkdir(parents=True)
-    for f in files:
-        out=release/f;out.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source/f,out)
-    # Copy staging binaries into the versioned release. Reused system tools stay external.
-    if a.tools_dir:
-        for name in known:
-            if Path(runtime[name]).parent==a.tools_dir.absolute():
-                out=release/'vendor'/name;out.parent.mkdir(exist_ok=True);shutil.copy2(runtime[name],out);runtime[name]=str(out)
-    (release/'runtime.json').write_text(json.dumps(runtime,indent=2)+'\n')
-# Record the paths actually used, including binaries copied into this release.
-for name in known:versions[name]['path']=runtime[name]
-binpath=release/'bin';binpath.mkdir(exist_ok=True)
-for name in ['peek','packz','unpackz']:
-    # Use subcommand form so argv[0] need not rely on symlink resolution.
-    body='#!/bin/sh\nexec '+shlex.quote(runtime['python3'])+' '+shlex.quote(str(release/'bio_cli.py'))+' '+name+' "$@"\n'
-    (binpath/name).write_text(body);(binpath/name).chmod(0o755)
-for name in ['gdu','dust-du','dua','bat','rg','fd','eza','zstd','samtools','bcftools','bgzip']:
-    extra=''
-    if name=='gdu':extra=' --no-delete --no-spawn-shell -m 2'
-    if name=='dua':extra=' -t 2'
-    if name=='dust-du':extra=' -T 2'
-    (binpath/name).write_text('#!/bin/sh\nexec '+shlex.quote(runtime[name])+extra+' "$@"\n');(binpath/name).chmod(0o755)
-# Only owned symlinks are replaced. Current switches atomically.
-current=base/'current'
-if current.exists() and not current.is_symlink():raise SystemExit('Unmanaged current directory; refusing replacement')
-previous=os.readlink(current) if current.is_symlink() else None
-temporary=base/('current.new-'+str(os.getpid()))
-temporary.symlink_to(release);os.replace(temporary,current)
-userbin=prefix/'bin';userbin.mkdir(exist_ok=True)
-for name in ['peek','packz','unpackz','dust-du']:
-    link=userbin/name;target=current/'bin'/name
-    if link.exists() or link.is_symlink():
-        if not link.is_symlink() or os.readlink(link)!=str(target):raise SystemExit('Unmanaged executable conflict: '+name)
-    else:link.symlink_to(target)
-if a.shell_file:
-    shell=a.shell_file.expanduser().absolute()
-    old=shell.read_text() if shell.exists() else ''
-    marker='# bio-cli: managed PATH entry'
-    line='export PATH='+shlex.quote(str(current/'bin'))+':"$PATH"'
-    if marker not in old:
-        if shell.exists():shutil.copy2(shell,state/(shell.name+'.backup'))
-        with shell.open('a') as f:f.write('\n'+marker+'\n'+line+'\n')
-    elif line not in old:raise SystemExit('Existing PATH marker differs; inspect manually')
-record={'release_id':release_id,'release':str(release),'previous':previous,'tools':versions,'shell_file':str(a.shell_file) if a.shell_file else None}
-(state/'installation.json').write_text(json.dumps(record,indent=2)+'\n')
-print(json.dumps(record,indent=2))
+
+def switch(current, target):
+    temporary = current.with_name('current.new-' + str(os.getpid()))
+    try:
+        temporary.symlink_to(target)
+        os.replace(temporary, current)
+    finally:
+        if temporary.is_symlink(): temporary.unlink()
+
+
+def install(a):
+    source = Path(__file__).resolve().parents[1]
+    prefix = a.prefix.expanduser().resolve()
+    if prefix in [Path('/'), Path('/usr'), Path('/usr/local'), Path('/opt/homebrew')]:
+        raise ValueError('Choose a personal installation prefix')
+    base = prefix/'share/bio-cli'; base.mkdir(parents=True, exist_ok=True)
+    # Keep the lock inode stable. All installers for this prefix serialize here.
+    with (base/'install.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return install_locked(a, source, prefix, base)
+
+
+def install_locked(a, source, prefix, base):
+    current = base/'current'; userbin = prefix/'bin'
+    if (current.exists() or current.is_symlink()) and not current.is_symlink():
+        raise ValueError('Unmanaged current directory; refusing replacement')
+    for name in OWNED:
+        link = userbin/name
+        if link.exists() or link.is_symlink():
+            if not link.is_symlink() or os.readlink(link) != str(current/'bin'/name):
+                raise ValueError('Unmanaged executable conflict: ' + name)
+    shell = a.shell_file.expanduser().absolute() if a.shell_file else None
+    old_shell = None; new_shell = None; shell_mode = 0o600
+    if shell:
+        if shell.is_symlink():
+            raise ValueError('Shell configuration is a symlink; specify its real target')
+        if not shell.parent.is_dir():
+            raise ValueError('Shell configuration parent does not exist')
+        old_shell = shell.read_text() if shell.exists() else None
+        shell_mode = shell.stat().st_mode & 0o777 if shell.exists() else 0o600
+        marker = '# bio-cli: managed PATH entry'
+        line = 'export PATH=' + shlex.quote(str(current/'bin')) + ':"$PATH"'
+        if marker in (old_shell or ''):
+            if line not in old_shell: raise ValueError('Existing PATH marker differs; inspect manually')
+        else:
+            new_shell = (old_shell or '') + '\n' + marker + '\n' + line + '\n'
+    overrides = {}
+    for value in a.tool:
+        name, sep, path = value.partition('=')
+        if not sep or name not in KNOWN or not Path(path).is_absolute():
+            raise ValueError('Use --tool KNOWN_NAME=/absolute/path')
+        overrides[name] = path
+    version = (source/'VERSION').read_text().strip()
+    h = hashlib.sha256()
+    for file in FILES: h.update(file.encode()); h.update((source/file).read_bytes())
+    release_id = version + '-' + h.hexdigest()[:12]
+    releases = base/'releases'; releases.mkdir(exist_ok=True)
+    release = releases/release_id
+    state = prefix/'state/bio-cli'/('install-' + release_id)
+    state.mkdir(parents=True, exist_ok=True)
+    def managed(value):
+        resolved = Path(value).resolve()
+        return (resolved.parent == (current/'bin').resolve() or
+                (resolved.parent.name == 'bin' and resolved.parent.parent.parent == releases))
+    old_config = current/'runtime.json'
+    previous_runtime = json.loads(old_config.read_text()) if old_config.is_file() else {}
+    def previous(name):
+        value = previous_runtime.get(name)
+        return value if value and not managed(value) and os.access(value, os.X_OK) else None
+    def find(name):
+        for entry in os.environ.get('PATH', '').split(os.pathsep):
+            if not entry: continue
+            candidate = Path(entry)/name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                if not managed(candidate): return str(candidate.absolute())
+                if previous(name): return previous(name)
+        return previous(name)
+    runtime = {}
+    for name in KNOWN:
+        candidate = overrides.get(name)
+        if not candidate and name not in ['gdu','dust-du']: candidate = find(name)
+        if not candidate and a.tools_dir and (a.tools_dir/name).is_file():
+            candidate = str((a.tools_dir/name).absolute())
+        if not candidate: candidate = find(name)
+        if not candidate: raise ValueError('Missing dependency before installation: ' + name)
+        if managed(candidate): raise ValueError('Managed wrapper is not a dependency: ' + name)
+        if not Path(candidate).is_file() or not os.access(candidate, os.X_OK):
+            raise ValueError('Not executable: ' + candidate)
+        runtime[name] = str(Path(candidate).absolute())
+    if release.exists():
+        # Incomplete legacy directories cannot be activated. Preserve them for inspection.
+        required = FILES + ['runtime.json'] + ['bin/'+n for n in OWNED+WRAPPED]
+        if any(not (release/f).is_file() for f in required):
+            raise ValueError('Incomplete existing release; retained for inspection: ' + str(release))
+        if any((release/f).read_bytes() != (source/f).read_bytes() for f in FILES):
+            raise ValueError('Existing release source differs; refusing mutation')
+        installed = json.loads((release/'runtime.json').read_text())
+        for name, value in overrides.items():
+            same = name in installed and Path(value).resolve() == Path(installed[name]).resolve()
+            if not same and a.tools_dir and name in installed:
+                staged_copy = Path(value).parent == a.tools_dir.absolute() and Path(installed[name]) == release/'vendor'/name
+                same = staged_copy and Path(value).read_bytes() == Path(installed[name]).read_bytes()
+            if not same:
+                raise ValueError('Existing release uses a different dependency: ' + name + '; choose a new personal --prefix')
+        runtime = installed
+    versions = {}
+    for name in KNOWN:
+        if name not in runtime or managed(runtime[name]):
+            raise ValueError('Invalid installed dependency: ' + name)
+        result = subprocess.run([runtime[name], '--version'], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+        if result.returncode: raise ValueError('Version probe failed: ' + name)
+        versions[name] = {'path': runtime[name], 'version': result.stdout.decode('utf-8','replace').splitlines()[:3]}
+    if not release.exists():
+        staging = Path(tempfile.mkdtemp(prefix='.build-'+release_id+'-', dir=str(releases)))
+        try:
+            for file in FILES:
+                dest = staging/file; dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source/file, dest)
+            if a.tools_dir:
+                for name in KNOWN:
+                    if Path(runtime[name]).parent == a.tools_dir.absolute():
+                        dest = staging/'vendor'/name; dest.parent.mkdir(exist_ok=True)
+                        shutil.copy2(runtime[name], dest)
+                        runtime[name] = str(release/'vendor'/name)
+            (staging/'runtime.json').write_text(json.dumps(runtime, indent=2)+'\n')
+            binpath = staging/'bin'; binpath.mkdir()
+            for name in ['peek','packz','unpackz','bio-cli']:
+                command = '' if name == 'bio-cli' else ' ' + name
+                body = '#!/bin/sh\nexec '+shlex.quote(runtime['python3'])+' '+shlex.quote(str(release/'bio_cli.py'))+command+' "$@"\n'
+                (binpath/name).write_text(body); (binpath/name).chmod(0o755)
+            for name in WRAPPED:
+                extra = {'gdu':' --no-delete --no-spawn-shell -m 2','dua':' -t 2','dust-du':' -T 2'}.get(name,'')
+                (binpath/name).write_text('#!/bin/sh\nexec '+shlex.quote(runtime[name])+extra+' "$@"\n')
+                (binpath/name).chmod(0o755)
+            # Syntax and CLI entry are checked before a release can be activated.
+            compile((staging/'bio_cli.py').read_text(), 'bio_cli.py', 'exec')
+            interpreter = staging/'vendor/python3' if runtime['python3'] == str(release/'vendor/python3') else Path(runtime['python3'])
+            subprocess.run([str(interpreter), str(staging/'bio_cli.py'), '--help'],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True, timeout=15)
+            staging.rename(release)
+        except BaseException:
+            print('Build failed; inactive staging retained at ' + str(staging), file=sys.stderr)
+            raise
+    for name in KNOWN: versions[name]['path'] = runtime[name]
+    # Do not rewrite an existing complete release, including its active wrappers.
+    previous_target = os.readlink(current) if current.is_symlink() else None
+    receipt = state/'installation.json'
+    old_receipt = receipt.read_text() if receipt.exists() else None
+    record = {'release_id':release_id, 'release':str(release), 'previous':previous_target,
+              'tools':versions, 'shell_file':str(shell) if shell else None, 'status':'PREPARED'}
+    userbin.mkdir(exist_ok=True)
+    added = []; shell_changed = False; activated = False
+    try:
+        for name in OWNED:
+            link = userbin/name
+            if not (link.exists() or link.is_symlink()):
+                link.symlink_to(current/'bin'/name); added.append(link)
+        if new_shell is not None:
+            if old_shell is not None:
+                backup = state/(shell.name + '.backup')
+                if not backup.exists(): atomic_text(backup, old_shell, shell_mode)
+            atomic_text(shell, new_shell, shell_mode); shell_changed = True
+        atomic_text(receipt, json.dumps(record, indent=2)+'\n')
+        switch(current, release); activated = True
+        record['status'] = 'ACTIVE'
+        atomic_text(receipt, json.dumps(record, indent=2)+'\n')
+    except BaseException as exc:
+        rollback_errors = []
+        def restore(action):
+            try: action()
+            except BaseException as err: rollback_errors.append(str(err))
+        if activated:
+            if previous_target is None: restore(lambda: current.unlink())
+            else: restore(lambda: switch(current, previous_target))
+        if shell_changed:
+            if old_shell is None: restore(lambda: shell.unlink())
+            else: restore(lambda: atomic_text(shell, old_shell, shell_mode))
+        for link in added: restore(lambda link=link: link.unlink())
+        if old_receipt is not None: restore(lambda: atomic_text(receipt, old_receipt))
+        elif receipt.exists(): restore(lambda: receipt.unlink())
+        failure = {'status':'ROLLBACK_FAILED' if rollback_errors else 'ROLLED_BACK',
+                   'error':str(exc), 'rollback_errors':rollback_errors, 'release_id':release_id}
+        fd, name = tempfile.mkstemp(prefix='failed-', suffix='.json', dir=str(state))
+        with os.fdopen(fd,'w') as out: json.dump(failure,out,indent=2)
+        print('Installation failed; state: '+failure['status']+'; receipt: '+name, file=sys.stderr)
+        raise
+    return record
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prefix', type=Path, default=Path.home()/'.local')
+    parser.add_argument('--tools-dir', type=Path)
+    parser.add_argument('--tool', action='append', default=[], help='NAME=/absolute/path')
+    parser.add_argument('--shell-file', type=Path)
+    args = parser.parse_args()
+    try:
+        print(json.dumps(install(args), indent=2))
+        return 0
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print('install: '+str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

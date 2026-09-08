@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.5
+
+- Preflight directory members against the safe restore policy before publishing archives.
+- Keep a sibling incomplete status until all restore metadata succeeds, including read-only archive roots.
+- Let mutually exclusive `-C` / `-o` choose restore mode independently of filename suffix.
+- Stage and serialize installations, preserve complete release entries, and compensate activation failures with retained failure records.
+- Add `bio-cli tools` with examples and read-only `bio-cli doctor` path/version diagnostics.
+- Add synthetic roundtrip, metadata failure, staged retry and activation rollback regressions.
+
+
 ## 0.1.4
 
 - Show command-specific usage instead of internal Python invocation details.

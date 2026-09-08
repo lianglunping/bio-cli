@@ -160,6 +160,90 @@ class Acceptance(unittest.TestCase):
         bad=self.put('broken.gz',gzip.compress(self.text)[:-4]);out=self.p/'out.txt'
         self.runcli('unpackz',bad,'-o',out,ok=False)
         self.assertFalse(out.exists())
+    def test_pack_rejects_unrestorable_members_before_publication(self):
+        root=self.p/'project';root.mkdir()
+        outside=self.put('outside.txt')
+        (root/'link').symlink_to(outside)
+        self.runcli('packz',root,ok=False)
+        self.assertFalse((self.p/'project.tar.zst').exists())
+        self.assertEqual(list(self.p.glob('*.partial-*')),[])
+        (root/'link').unlink()
+        os.mkfifo(root/'pipe')
+        self.runcli('packz',root,ok=False)
+        self.assertFalse((self.p/'project.tar.zst').exists())
+        self.assertTrue((root/'pipe').exists())
+
+    def test_explicit_restore_mode_overrides_suffix(self):
+        root=self.p/'project';root.mkdir();(root/'data.txt').write_bytes(self.text)
+        packed=self.p/'arbitrary.data'
+        self.runcli('packz',root,'-o',packed)
+        restored=self.p/'restored'
+        self.runcli('unpackz',packed,'-C',restored)
+        self.assertEqual((restored/'project/data.txt').read_bytes(),self.text)
+        tar=self.p/'ordinary.tar'
+        with tarfile.open(tar,'w') as a:
+            item=tarfile.TarInfo('data.txt');item.size=len(self.text);a.addfile(item,io.BytesIO(self.text))
+        self.runcli('packz',tar)
+        out=self.p/'restored.tar'
+        self.runcli('unpackz',str(tar)+'.zst','-o',out)
+        self.assertEqual(tar.read_bytes(),out.read_bytes())
+        self.runcli('unpackz',packed,'-C',self.p/'unused','-o',self.p/'unused.txt',ok=False)
+        self.assertFalse((self.p/'unused').exists())
+
+    def test_restore_status_survives_metadata_failure(self):
+        source=self.p/'badtime.tar'
+        with tarfile.open(source,'w',format=tarfile.PAX_FORMAT) as a:
+            item=tarfile.TarInfo('directory');item.type=tarfile.DIRTYPE;item.mtime=1e30;a.addfile(item)
+        out=self.p/'failed'
+        result=self.runcli('unpackz',source,'-C',out,ok=False)
+        self.assertNotIn(b'Traceback',result.stderr)
+        self.assertTrue((self.p/'failed.bio-cli-incomplete').is_file())
+        self.assertTrue((out/'.bio-cli-incomplete').is_file())
+
+    def test_restore_readonly_root_and_reserved_member(self):
+        source=self.p/'readonly.tar'
+        with tarfile.open(source,'w') as a:
+            item=tarfile.TarInfo('.');item.type=tarfile.DIRTYPE;item.mode=0o500;a.addfile(item)
+            item=tarfile.TarInfo('data.txt');item.size=len(self.text);a.addfile(item,io.BytesIO(self.text))
+        out=self.p/'readonly'
+        try:
+            self.runcli('unpackz',source,'-C',out)
+            self.assertEqual(out.stat().st_mode & 0o777,0o500)
+            self.assertFalse((self.p/'readonly.bio-cli-incomplete').exists())
+            self.assertFalse((out/'.bio-cli-incomplete').exists())
+        finally:
+            if out.exists():out.chmod(0o700)
+        source=self.p/'reserved.tar'
+        with tarfile.open(source,'w') as a:a.addfile(tarfile.TarInfo('.bio-cli-incomplete'),io.BytesIO())
+        out=self.p/'reserved'
+        self.runcli('unpackz',source,'-C',out,ok=False)
+        self.assertTrue((self.p/'reserved.bio-cli-incomplete').exists())
+
+    def test_tools_overview_and_doctor(self):
+        output=self.runcli('tools').stdout.decode()
+        for name in ['rg','fd','eza','dua','peek','packz','unpackz']:
+            self.assertIn(name,output)
+        # No dependence on the user's PATH: each synthetic backend supplies a version.
+        import json
+        standalone=self.p/'standalone';standalone.mkdir()
+        shutil.copy2(CLI,standalone/'bio_cli.py')
+        backend=self.p/'backend'
+        backend.write_text('#!/bin/sh\nprintf "synthetic version 1.0\\n"\n');backend.chmod(0o755)
+        names=['python3','tar','gzip','bzip2','xz','rg','fd','eza','dua','gdu','dust-du','bat','zstd','samtools','bcftools','bgzip']
+        mapping={name:str(backend) for name in names}
+        (standalone/'runtime.json').write_text(json.dumps(mapping))
+        args=[sys.executable,str(standalone/'bio_cli.py'),'doctor','--json']
+        result=subprocess.run(args,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        report=json.loads(result.stdout)
+        self.assertEqual(len(report['checks']),16)
+        self.assertTrue(all(row['status']=='OK' for row in report['checks']))
+        mapping['rg']=str(self.p/'missing')
+        (standalone/'runtime.json').write_text(json.dumps(mapping))
+        result=subprocess.run(args,capture_output=True,timeout=10)
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(next(x for x in json.loads(result.stdout)['checks'] if x['tool']=='rg')['status'],'ERROR')
+
     def test_bam_bcf_cram(self):
         sam=self.put('synthetic.sam',b'@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chrSynthetic\tLN:100\nreadSynthetic\t0\tchrSynthetic\t1\t60\t4M\t*\t0\t0\tACGT\tIIII\n')
         ref=self.put('synthetic.fa',b'>chrSynthetic\n'+b'ACGT'*25+b'\n')

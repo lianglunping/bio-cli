@@ -10,13 +10,14 @@ import re
 from pathlib import Path, PurePosixPath
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import zipfile
 
-VERSION = '0.1.4'
+VERSION = '0.1.5'
 LIMIT = 1024 * 1024
 INDEX = ('.bai', '.csi', '.tbi', '.gzi', '.0123', '.bwt.2bit.64', '.pac', '.bwt', '.sa')
 SPECIAL = ('.bw', '.bigwig', '.bb', '.bigbed', '.h5', '.hdf5', '.h5ad', '.rds', '.rdata', '.rda')
@@ -208,6 +209,31 @@ def publish(partial, target):
     partial.unlink()
 
 
+def validate_pack_tree(source):
+    """Reject members our safe restore cannot reproduce; never follow links."""
+    root = source.resolve()
+    member_path(source.name)
+    if source.name == '.bio-cli-incomplete':
+        raise Error('Source name conflicts with the restore status marker')
+    def check(path):
+        member_path(str(path.relative_to(source)))
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            value = os.readlink(path)
+            if os.path.isabs(value):
+                raise Error('Directory contains an absolute symbolic link: ' + str(path))
+            target = (path.parent / value).resolve()
+            if target != root and root not in target.parents:
+                raise Error('Directory contains an escaping symbolic link: ' + str(path))
+        elif not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise Error('Directory contains an unsupported special member: ' + str(path))
+    def fail(exc):
+        raise exc
+    for parent, directories, files in os.walk(source, followlinks=False, onerror=fail):
+        for name in directories + files:
+            check(Path(parent) / name)
+
+
 def pack(args):
     source = Path(args.input).absolute()
     if source.is_symlink() or not (source.is_file() or source.is_dir()):
@@ -223,6 +249,8 @@ def pack(args):
         raise Error('Archive output must be outside the source directory')
     if not is_dir and source.name.lower().endswith(('.gz', '.zst', '.xz', '.bz2', '.bam', '.cram', '.bcf', '.zip')):
         print('packz: input is already compressed; additional compression may save little space', file=sys.stderr)
+    if is_dir:
+        validate_pack_tree(source)
     command = compressor(args.format, args.threads, args.level)
     fd, name = tempfile.mkstemp(prefix=target.name + '.partial-', dir=str(target.parent))
     partial = Path(name)
@@ -294,22 +322,44 @@ def extract_member(archive, member, root, directories):
 
 def unpack(args):
     source = regular(args.input)
-    if source.name.lower().endswith(ARCHIVES):
+    if args.directory or (not args.output and source.name.lower().endswith(ARCHIVES)):
         if not args.directory: raise Error('Directory archives require -C <new-directory>')
         root = Path(args.directory).absolute()
-        root.mkdir(parents=False, exist_ok=False)
+        status = root.with_name(root.name + '.bio-cli-incomplete')
+        # A sibling marker remains writable even if archive metadata makes root read-only.
+        with status.open('x') as out:
+            out.write('Extraction incomplete. Original archive is unchanged.\n')
+        try:
+            root.mkdir(parents=False, exist_ok=False)
+        except BaseException:
+            status.unlink()
+            raise
         root = root.resolve()
         marker = root / '.bio-cli-incomplete'
-        marker.write_text('Extraction incomplete. Original archive is unchanged.\n')
         directories = []
-        with reader(source) as r:
-            with tarfile.open(fileobj=r.stream, mode='r|') as archive:
-                for member in archive:
-                    extract_member(archive, member, root, directories)
-            while r.stream.read(65536): pass
-        marker.unlink()
-        for dest, member in reversed(directories):
-            os.chmod(dest, member.mode & 0o777); os.utime(dest, (member.mtime, member.mtime))
+        try:
+            marker.write_text('Extraction incomplete; see sibling status marker.\n')
+            with reader(source) as r:
+                with tarfile.open(fileobj=r.stream, mode='r|') as archive:
+                    for member in archive:
+                        if member_path(member.name) == PurePosixPath('.bio-cli-incomplete'):
+                            raise Error('Archive member conflicts with restore status marker')
+                        extract_member(archive, member, root, directories)
+                while r.stream.read(65536): pass
+            marker.unlink()
+            for dest, member in reversed(directories):
+                os.chmod(dest, member.mode & 0o777)
+                os.utime(dest, (member.mtime, member.mtime))
+            status.unlink()
+        except BaseException:
+            # Best effort compatibility marker; sibling status is authoritative.
+            try:
+                with marker.open('x') as out:
+                    out.write('Extraction incomplete; see sibling status marker.\n')
+            except OSError:
+                pass
+            print('unpackz: incomplete restore; status at ' + str(status), file=sys.stderr)
+            raise
         print(str(root))
     else:
         if args.directory: raise Error('-C is for directory archives; use -o for a single file')
@@ -395,10 +445,69 @@ def configure_command(parser, command):
         parser.add_argument('-o', '--output', help='指定新输出文件；默认在源文件旁添加 .zst/.gz 或 .tar.zst')
         parser.epilog = '示例：\n  packz table.tsv\n  packz project_directory\n  packz --format bgzip variants.vcf\n  packz -t 2 -l 6 -o archive.tar.zst project_directory'
     elif command == 'unpackz':
-        parser.add_argument('-C', '--directory', help='tar 归档恢复到此新目录；目录必须不存在')
-        parser.add_argument('-o', '--output', help='单文件恢复的目标文件；默认去掉压缩后缀')
+        mode = parser.add_mutually_exclusive_group()
+        mode.add_argument('-C', '--directory', help='按 tar 归档恢复到新目录；显式指定时不依赖文件后缀')
+        mode.add_argument('-o', '--output', help='按单个压缩流恢复到新文件；即使名字含 .tar 也不展开归档')
         parser.epilog = '示例：\n  unpackz table.tsv.zst -o restored.tsv\n  unpackz archive.tar.zst -C restored_project\n\nZIP 仅支持 peek 列表预览，不支持 unpackz 解包。'
     parser.add_argument('input', metavar='FILE' if command != 'packz' else 'PATH', help='待处理的文件' if command != 'packz' else '待压缩的文件或目录')
+
+
+TOOL_GUIDE = [
+    ('peek', '限量预览生信文件', 'peek -n 20 annotation.gff3.gz'),
+    ('packz', '压缩文件或目录', 'packz project_directory'),
+    ('unpackz', '恢复到新文件或目录', 'unpackz archive.tar.zst -C restored'),
+    ('rg', '搜索文本内容', "rg -n 'ERROR|failed' logs/"),
+    ('fd', '按文件名寻找文件', 'fd -t f -e bam .'),
+    ('eza', '文件列表和目录树', 'eza --tree --level=2 reference/'),
+    ('dua', '统计目录磁盘占用', 'dua aggregate results/ reference/'),
+    ('gdu', '交互查看目录占用', 'gdu results/'),
+    ('dust-du', '显示目录占用分布', 'dust-du results/'),
+    ('bat', '查看文本及语法高亮', 'bat script.py'),
+    ('zstd', '原生 zstd 压缩与校验', 'zstd -t archive.tar.zst'),
+    ('samtools', '比对格式工具', 'samtools view -H alignments.bam'),
+    ('bcftools', '变异格式工具', 'bcftools view -h variants.bcf'),
+    ('bgzip', 'BGZF 分块压缩', 'bgzip -c variants.vcf > variants.vcf.gz'),
+]
+
+
+def tools_overview(args):
+    print('bio-cli 工具总览（示例名请替换为自己的文件）')
+    for name, purpose, example in TOOL_GUIDE:
+        print('%-10s %s\n           %s' % (name, purpose, example))
+    print('\n各工具是独立命令；使用 NAME --help 查看完整参数。')
+    print('bio-cli doctor 检查实际路径和版本；不会安装、修改配置或扫描数据目录。')
+    print('peek 只预览部分内容；rg 搜索预览结果不能代表全文件。')
+
+
+def doctor(args):
+    rows = []
+    for name in ['python3', 'tar', 'gzip', 'bzip2', 'xz'] + [x[0] for x in TOOL_GUIDE[3:]]:
+        row = {'tool': name, 'path': None, 'status': 'ERROR'}
+        try:
+            path = tool(name)
+            row['path'] = path
+            with tempfile.TemporaryFile() as output:
+                proc = subprocess.run([path, '--version'], stdin=subprocess.DEVNULL,
+                                      stdout=output, stderr=subprocess.STDOUT, timeout=15)
+                output.seek(0)
+                row['version'] = safe_text(output.read(2048)).strip().splitlines()[:3]
+            row['status'] = 'OK' if proc.returncode == 0 else 'ERROR'
+            row['exit_code'] = proc.returncode
+        except (Error, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            row['error'] = str(exc)
+        rows.append(row)
+    result = {'bio_cli_version': VERSION, 'checks': rows,
+              'scope': 'Path and version probes only; not full format capability validation'}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print('bio-cli ' + VERSION + '：只读路径与版本检查')
+        for row in rows:
+            print(safe_text(('%s %s %s\n  %s' % (row['status'], row['tool'], row['path'] or '-',
+                  '; '.join(row.get('version', [])) or row.get('error', ''))).encode('utf-8', 'replace')))
+        print('检查不等于完整格式能力验收；输出含本机路径，分享前请检查。')
+    if any(row['status'] != 'OK' for row in rows):
+        raise Error('One or more dependency checks failed')
 
 
 def main():
@@ -413,16 +522,19 @@ def main():
         subparsers = parser.add_subparsers(dest='command', required=True)
         for name in commands:
             configure_command(subparsers.add_parser(name, prog=name), name)
+        subparsers.add_parser('tools', help='工具用途和常用示例')
+        doctor_parser = subparsers.add_parser('doctor', help='只读检查工具路径与版本，不修改环境')
+        doctor_parser.add_argument('--json', action='store_true', help='输出本机诊断 JSON；含实际路径，请勿直接公开')
     args = parser.parse_args()
     command = invoked if invoked in commands else args.command
     try:
-        {'peek': peek, 'packz': pack, 'unpackz': unpack}[command](args)
+        {'peek': peek, 'packz': pack, 'unpackz': unpack, 'tools': tools_overview, 'doctor': doctor}[command](args)
         return 0
     except BrokenPipeError:
         sys.stdout = open(os.devnull, 'w'); return 0
     except KeyboardInterrupt:
         print('Interrupted; source data unchanged', file=sys.stderr); return 130
-    except (Error, OSError, ValueError, tarfile.TarError, zipfile.BadZipFile, EOFError) as exc:
+    except (Error, OSError, ValueError, tarfile.TarError, zipfile.BadZipFile, EOFError, OverflowError, RuntimeError) as exc:
         print(safe_text((command + ': ' + str(exc)).encode('utf-8', 'replace')), file=sys.stderr); return 2
 
 if __name__ == '__main__':

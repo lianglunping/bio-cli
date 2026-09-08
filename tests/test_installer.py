@@ -50,7 +50,12 @@ class InstallerRegression(unittest.TestCase):
                 r=subprocess.run([str(prefix/'share/bio-cli/current/bin'/name),'--version'],input=b'',capture_output=True,timeout=3)
                 self.assertEqual(r.returncode,0)
             self.assertEqual(shell.read_text().count('# bio-cli: managed PATH entry'),1)
+            entry=prefix/'share/bio-cli/current/bin/peek'
+            before=entry.stat().st_mtime_ns
             run();self.assertEqual(shell.read_text().count('# bio-cli: managed PATH entry'),1)
+            self.assertEqual(entry.stat().st_mtime_ns,before)
+            overview=subprocess.check_output([str(prefix/'bin/bio-cli'),'tools'],env=env,timeout=5)
+            self.assertIn(b'rg',overview)
             # Conflicting configuration must fail before changing an installed release.
             replacement=p/'replacement-zstd'
             replacement.write_text('#!/bin/sh\nprintf "replacement tool\\n"\n');replacement.chmod(0o755)
@@ -68,5 +73,56 @@ class InstallerRegression(unittest.TestCase):
             self.assertNotEqual(rejected.returncode,0)
             self.assertIn(b'Managed wrapper is not a dependency',rejected.stderr)
             self.assertEqual(os.readlink(current),original_target)
+
+class InstallerTransactions(unittest.TestCase):
+    def test_build_failure_retry_and_activation_rollback(self):
+        import argparse
+        import importlib.util
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory(prefix='bio-cli-transaction-') as tmp:
+            p=Path(tmp);source=p/'source';source.mkdir()
+            files=['bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
+            for file in files:
+                dest=source/file;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(ROOT/file,dest)
+            fake=p/'fake';fake.mkdir()
+            names=['tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip','gdu','dust-du','dua','bat','rg','fd','eza']
+            for name in names:
+                f=fake/name;f.write_text('#!/bin/sh\nprintf "synthetic version 1.0\\n"\n');f.chmod(0o755)
+            spec=importlib.util.spec_from_file_location('synthetic_installer',source/'scripts/install.py')
+            module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            prefix=p/'prefix';shell=p/'shellrc'
+            shell.write_text('# original\n')
+            a=argparse.Namespace(prefix=prefix,tools_dir=fake,tool=['python3='+sys.executable]+[n+'='+str(fake/n) for n in names],shell_file=shell)
+            first=module.install(a)
+            current=prefix/'share/bio-cli/current';old_target=os.readlink(current)
+            old_shell=shell.read_bytes()
+            (source/'VERSION').write_text('0.0.98\n')
+            original_copy=module.shutil.copy2
+            def fail_copy(src,dst,*args,**kwargs):
+                if Path(src).name=='VERSION':raise OSError('synthetic copy failure')
+                return original_copy(src,dst,*args,**kwargs)
+            with patch.object(module.shutil,'copy2',side_effect=fail_copy):
+                with self.assertRaises(OSError):module.install(a)
+            self.assertEqual(os.readlink(current),old_target)
+            second=module.install(a)
+            self.assertNotEqual(second['release'],first['release'])
+            old_target=os.readlink(current)
+            (source/'VERSION').write_text('0.0.97\n')
+            original_atomic=module.atomic_text;failed=[False]
+            def fail_receipt(path,text,*args,**kwargs):
+                if path.name=='installation.json' and '"status": "ACTIVE"' in text and not failed[0]:
+                    failed[0]=True;raise OSError('synthetic receipt failure')
+                return original_atomic(path,text,*args,**kwargs)
+            with patch.object(module,'atomic_text',side_effect=fail_receipt):
+                with self.assertRaises(OSError):module.install(a)
+            self.assertEqual(os.readlink(current),old_target)
+            self.assertEqual(shell.read_bytes(),old_shell)
+            failures=list((prefix/'state/bio-cli').glob('*/failed-*.json'))
+            self.assertEqual(json.loads(failures[0].read_text())['status'],'ROLLED_BACK')
+            self.assertEqual(module.install(a)['status'],'ACTIVE')
+            # A bad Shell target fails before activation in a new prefix.
+            a.prefix=p/'new-prefix';a.shell_file=p/'missing-parent/shellrc'
+            with self.assertRaises(ValueError):module.install(a)
+            self.assertFalse((a.prefix/'share/bio-cli/current').exists())
 
 if __name__=='__main__':unittest.main(verbosity=2)
