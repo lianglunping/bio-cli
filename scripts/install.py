@@ -13,12 +13,26 @@ import sys
 import tempfile
 import socket
 
-FILES = ['bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py',
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bio_runtime import run_capture
+
+FILES = ['bio_runtime.py','tests/test_runtime.py','tests/test_fetch_tools.py','bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py',
          'scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
 OWNED = ['peek','packz','unpackz','dust-du','bio-cli']
 KNOWN = ['python3','tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip',
          'gdu','dust-du','dua','bat','rg','fd','eza']
 WRAPPED = ['gdu','dust-du','dua','bat','rg','fd','eza','zstd','samtools','bcftools','bgzip']
+
+
+def wrapper_bodies(runtime, release):
+    bodies = {}
+    for name in ['peek', 'packz', 'unpackz', 'bio-cli']:
+        command = '' if name == 'bio-cli' else ' ' + name
+        bodies[name] = '#!/bin/sh\nexec '+shlex.quote(runtime['python3'])+' '+shlex.quote(str(release/'bio_cli.py'))+command+' "$@"\n'
+    for name in WRAPPED:
+        extra = {'gdu':' --no-delete --no-spawn-shell -m 2','dua':' -t 2','dust-du':' -T 2'}.get(name,'')
+        bodies[name] = '#!/bin/sh\nexec '+shlex.quote(runtime[name])+extra+' "$@"\n'
+    return bodies
 
 
 def atomic_text(path, text, mode=0o600):
@@ -152,12 +166,15 @@ def install_locked(a, source, prefix, base):
             if not same:
                 raise ValueError('Existing release uses a different dependency: ' + name + '; choose a new personal --prefix')
         runtime = installed
+        for name, body in wrapper_bodies(runtime, release).items():
+            entry = release/'bin'/name
+            if entry.read_text() != body or not os.access(entry, os.X_OK):
+                raise ValueError('Existing release wrapper differs: ' + name)
     versions = {}
     for name in KNOWN:
         if name not in runtime or managed(runtime[name]):
             raise ValueError('Invalid installed dependency: ' + name)
-        result = subprocess.run([runtime[name], '--version'], stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+        result = run_capture([runtime[name], '--version'], timeout=15)
         if result.returncode: raise ValueError('Version probe failed: ' + name)
         versions[name] = {'path': runtime[name], 'version': result.stdout.decode('utf-8','replace').splitlines()[:3]}
     if not release.exists():
@@ -174,14 +191,8 @@ def install_locked(a, source, prefix, base):
                         runtime[name] = str(release/'vendor'/name)
             (staging/'runtime.json').write_text(json.dumps(runtime, indent=2)+'\n')
             binpath = staging/'bin'; binpath.mkdir()
-            for name in ['peek','packz','unpackz','bio-cli']:
-                command = '' if name == 'bio-cli' else ' ' + name
-                body = '#!/bin/sh\nexec '+shlex.quote(runtime['python3'])+' '+shlex.quote(str(release/'bio_cli.py'))+command+' "$@"\n'
+            for name, body in wrapper_bodies(runtime, release).items():
                 (binpath/name).write_text(body); (binpath/name).chmod(0o755)
-            for name in WRAPPED:
-                extra = {'gdu':' --no-delete --no-spawn-shell -m 2','dua':' -t 2','dust-du':' -T 2'}.get(name,'')
-                (binpath/name).write_text('#!/bin/sh\nexec '+shlex.quote(runtime[name])+extra+' "$@"\n')
-                (binpath/name).chmod(0o755)
             # Syntax and CLI entry are checked before a release can be activated.
             compile((staging/'bio_cli.py').read_text(), 'bio_cli.py', 'exec')
             interpreter = staging/'vendor/python3' if runtime['python3'] == str(release/'vendor/python3') else Path(runtime['python3'])

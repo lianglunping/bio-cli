@@ -5,6 +5,7 @@ import contextlib
 import gzip
 import hashlib
 import json
+import math
 import os
 import re
 from pathlib import Path, PurePosixPath
@@ -17,7 +18,10 @@ import tarfile
 import tempfile
 import zipfile
 
-VERSION = '0.1.6'
+from bio_runtime import ManagedProcess, run_capture
+
+VERSION = '0.1.7'
+
 LIMIT = 1024 * 1024
 INDEX = ('.bai', '.csi', '.tbi', '.gzi', '.0123', '.bwt.2bit.64', '.pac', '.bwt', '.sa')
 SPECIAL = ('.bw', '.bigwig', '.bb', '.bigbed', '.h5', '.hdf5', '.h5ad', '.rds', '.rdata', '.rda')
@@ -56,42 +60,36 @@ def compression(path):
 
 
 class Reader:
-    """A bounded consumer; intentional truncation cancels the producer, errors do not."""
-    def __init__(self, path, command=None, env=None):
-        self.command = command
+    """Bounded diagnostic capture; timeout applies to the owned backend group."""
+    def __init__(self, path, command=None, env=None, timeout=None):
         if command is None:
             c = compression(path)
             if c:
                 command = [tool(c), '-dc', str(path)]
-        self.proc = None
         self.truncated = False
-        self.error = tempfile.TemporaryFile()
+        self.process = None
         if command:
-            self.proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=self.error, env=env)
-            self.stream = self.proc.stdout
+            self.process = ManagedProcess(command, env=env, timeout=timeout)
+            self.stream = self.process.stdout
         else:
             self.stream = path.open('rb')
 
     def close(self, cancel=False):
-        self.stream.close()
-        code = 0
-        if self.proc:
-            if cancel and self.proc.poll() is None:
-                self.proc.terminate()
-            try:
-                code = self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill(); code = self.proc.wait()
-        self.error.seek(0)
-        message = self.error.read(8192).decode('utf-8', 'replace').strip()
-        self.error.close()
-        if code and not cancel:
-            raise Error(message or 'Reader failed with exit code ' + str(code))
+        try:
+            self.stream.close()
+        finally:
+            if self.process:
+                code = self.process.finish(cancel=cancel, wait_timeout=5)
+                message = bytes(self.process.errors.data).decode('utf-8', 'replace').strip()
+                if self.process.errors.truncated:
+                    message += '\n[backend diagnostics truncated]'
+                if code and not cancel:
+                    raise Error(message or 'Reader failed with exit code ' + str(code))
 
 
 @contextlib.contextmanager
-def reader(path, command=None, env=None):
-    r = Reader(path, command, env)
+def reader(path, command=None, env=None, timeout=None):
+    r = Reader(path, command, env, timeout)
     try:
         yield r
     except BaseException:
@@ -99,6 +97,18 @@ def reader(path, command=None, env=None):
         raise
     else:
         r.close(cancel=r.truncated)
+
+
+def iter_tar(archive):
+    # Explicit next() avoids retaining TarInfo for every earlier file. extractfile
+    # receives the current regular TarInfo; links are handled by our own policy.
+    while True:
+        member = archive.next()
+        if member is None:
+            break
+        archive.members.clear()
+        yield member
+
 
 
 def safe_text(data):
@@ -156,9 +166,9 @@ def peek(args):
         display(safe_text(result), args.no_pager)
     elif name.endswith(ARCHIVES):
         result = bytearray(); truncated = False
-        with reader(path) as r:
+        with reader(path, timeout=getattr(args, 'timeout', None)) as r:
             with tarfile.open(fileobj=r.stream, mode='r|') as archive:
-                for i, member in enumerate(archive):
+                for i, member in enumerate(iter_tar(archive)):
                     row = ('%d\t%s\n' % (member.size, member.name)).encode()
                     if i >= args.lines or len(result) + len(row) > args.max_bytes:
                         r.truncated = truncated = True; break
@@ -189,7 +199,7 @@ def peek(args):
             command = [tool('bcftools'), 'view', '--no-version', '-h' if args.header else '-Ov', str(path)]
         elif args.header:
             raise Error('--header is supported for BAM, CRAM and BCF; use -n for text formats')
-        with reader(path, command, env) as r:
+        with reader(path, command, env, getattr(args, 'timeout', None)) as r:
             text = preview_stream(r, args.lines, args.max_bytes)
             truncated = r.truncated
         display(text, args.no_pager)
@@ -258,30 +268,32 @@ def pack(args):
         with os.fdopen(fd, 'wb') as out:
             if is_dir:
                 env = os.environ.copy(); env['COPYFILE_DISABLE'] = '1'
-                tar = subprocess.Popen([tool('tar'), '-cf', '-', '-C', str(source.parent), '--', source.name], stdout=subprocess.PIPE, env=env)
+                tar = ManagedProcess([tool('tar'), '-cf', '-', '-C', str(source.parent), '--', source.name], env=env)
                 try:
-                    result = subprocess.run(command, stdin=tar.stdout, stdout=out)
+                    process = ManagedProcess(command, stdin=tar.stdout, stdout=out)
+                    result = process.finish()
                     tar.stdout.close()
-                    tarcode = tar.wait()
+                    tarcode = tar.finish(wait_timeout=5)
                 finally:
-                    if tar.poll() is None: tar.terminate(); tar.wait()
-                if result.returncode or tarcode: raise Error('Archive/compressor failed; partial output retained')
+                    tar.finish(cancel=True)
+                if result or tarcode: raise Error('Archive/compressor failed; partial output retained')
             else:
                 before = source.stat()
                 with source.open('rb') as inp:
-                    result = subprocess.run(command, stdin=inp, stdout=out)
+                    process = ManagedProcess(command, stdin=inp, stdout=out)
+                    result = process.finish()
                 after = source.stat()
-                if result.returncode: raise Error('Compressor failed; partial output retained')
+                if result: raise Error('Compressor failed; partial output retained')
                 if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
                     raise Error('Source changed during compression; partial output retained')
             out.flush(); os.fsync(out.fileno())
         check = [tool('zstd' if args.format == 'zstd' else 'gzip'), '-t', str(partial)]
-        if subprocess.run(check).returncode: raise Error('Compressed stream integrity test failed')
+        if ManagedProcess(check, stdout=subprocess.DEVNULL).finish(): raise Error('Compressed stream integrity test failed')
         publish(partial, target)
     except BaseException:
-        print('packz: incomplete output retained at ' + str(partial), file=sys.stderr)
+        print(safe_text(('packz: incomplete output retained at ' + str(partial)).encode('utf-8', 'replace')), file=sys.stderr)
         raise
-    print(str(target))
+    print(safe_text(str(target).encode('utf-8', 'replace')))
 
 
 def member_path(name):
@@ -298,7 +310,7 @@ def extract_member(archive, member, root, directories):
         if parent == root: break
         if parent.is_symlink(): raise Error('Archive member traverses a symbolic link')
     if member.isdir():
-        dest.mkdir(parents=True, exist_ok=True); directories.append((dest, member)); return
+        dest.mkdir(parents=True, exist_ok=True); directories[dest] = (member.mode & 0o777, member.mtime); return
     dest.parent.mkdir(parents=True, exist_ok=True)
     if member.issym():
         link = PurePosixPath(member.linkname)
@@ -336,20 +348,30 @@ def unpack(args):
             raise
         root = root.resolve()
         marker = root / '.bio-cli-incomplete'
-        directories = []
+        directories = {}
+        member_count = 0
+        expanded_bytes = 0
         try:
             marker.write_text('Extraction incomplete; see sibling status marker.\n')
             with reader(source) as r:
                 with tarfile.open(fileobj=r.stream, mode='r|') as archive:
-                    for member in archive:
+                    for member in iter_tar(archive):
+                        member_count += 1
+                        if args.max_members is not None and member_count > args.max_members:
+                            raise Error('Archive member limit exceeded')
+                        if member.isfile():
+                            expanded_bytes += member.size
+                        if args.max_output_bytes is not None and expanded_bytes > args.max_output_bytes:
+                            raise Error('Expanded byte limit exceeded')
                         if member_path(member.name) == PurePosixPath('.bio-cli-incomplete'):
                             raise Error('Archive member conflicts with restore status marker')
                         extract_member(archive, member, root, directories)
                 while r.stream.read(65536): pass
             marker.unlink()
-            for dest, member in reversed(directories):
-                os.chmod(dest, member.mode & 0o777)
-                os.utime(dest, (member.mtime, member.mtime))
+            for dest in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+                mode, mtime = directories[dest]
+                os.chmod(dest, mode)
+                os.utime(dest, (mtime, mtime))
             status.unlink()
         except BaseException:
             # Best effort compatibility marker; sibling status is authoritative.
@@ -358,11 +380,11 @@ def unpack(args):
                     out.write('Extraction incomplete; see sibling status marker.\n')
             except OSError:
                 pass
-            print('unpackz: incomplete restore; status at ' + str(status), file=sys.stderr)
+            print(safe_text(('unpackz: incomplete restore; status at ' + str(status)).encode('utf-8', 'replace')), file=sys.stderr)
             raise
-        print(str(root))
+        print(safe_text(str(root).encode('utf-8', 'replace')))
     else:
-        if args.directory: raise Error('-C is for directory archives; use -o for a single file')
+        if args.max_members is not None: raise Error('--max-members requires tar directory restore with -C')
         c = compression(source)
         if c not in ('zstd', 'gzip', 'xz', 'bzip2'): raise Error('Unsupported compressed stream')
         suffix = source.suffix.lower()
@@ -374,12 +396,31 @@ def unpack(args):
         partial = Path(name)
         try:
             with os.fdopen(fd, 'wb') as out, reader(source) as r:
-                shutil.copyfileobj(r.stream, out, 65536)
+                copy_limited(r.stream, out, args.max_output_bytes)
                 out.flush(); os.fsync(out.fileno())
             publish(partial, target)
         except BaseException:
-            print('unpackz: incomplete output retained at ' + str(partial), file=sys.stderr); raise
-        print(str(target))
+            print(safe_text(('unpackz: incomplete output retained at ' + str(partial)).encode('utf-8', 'replace')), file=sys.stderr); raise
+        print(safe_text(str(target).encode('utf-8', 'replace')))
+
+
+def copy_limited(source, output, limit=None):
+    count = 0
+    while True:
+        chunk = source.read(65536 if limit is None else min(65536, limit-count+1))
+        if not chunk:
+            return count
+        count += len(chunk)
+        if limit is not None and count > limit:
+            raise Error('Expanded byte limit exceeded')
+        output.write(chunk)
+
+
+def positive_seconds(value):
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError('must be a finite positive number')
+    return seconds
 
 
 def positive(value):
@@ -398,6 +439,7 @@ PEEK_EXAMPLES = """常用示例（文件名均为示例，请替换为自己的�
   peek --header alignments.bam           只看 BAM 头部
   peek -n 50 alignments.bam               查看 BAM 头部及后续比对记录
   peek variants.bcf                      将 BCF 转成 VCF 文本预览
+  peek --timeout 10 variants.bcf         后端处理超过 10 秒时退出
   peek --header alignments.cram          只看 CRAM 头部，不需要参考文件
   peek --reference reference.fa alignments.cram
                                         用本地参考预览 CRAM（需已有 .fai）
@@ -434,6 +476,7 @@ def configure_command(parser, command):
     if command == 'peek':
         parser.add_argument('-n', '--lines', type=positive, default=200, metavar='N', help='最多预览 N 行；归档为 N 个成员（默认：200）')
         parser.add_argument('--max-bytes', type=positive, default=LIMIT, metavar='BYTES', help='预览字节上限，填写正整数（默认：1048576，即 1 MiB）')
+        parser.add_argument('--timeout', type=positive_seconds, metavar='SECONDS', help='可选后端进程总时限；默认不设，不限制普通文件系统读取')
         parser.add_argument('--no-pager', action='store_true', help='直接输出到终端；用于重定向或管道时可显式指定')
         parser.add_argument('--header', action='store_true', help='仅显示 BAM/CRAM/BCF 头部，仍受行数和字节上限限制')
         parser.add_argument('--reference', metavar='FASTA', help='CRAM 记录预览所需的本地参考；必须已有 FASTA.fai')
@@ -445,10 +488,12 @@ def configure_command(parser, command):
         parser.add_argument('-o', '--output', help='指定新输出文件；默认在源文件旁添加 .zst/.gz 或 .tar.zst')
         parser.epilog = '示例：\n  packz table.tsv\n  packz project_directory\n  packz --format bgzip variants.vcf\n  packz -t 2 -l 6 -o archive.tar.zst project_directory'
     elif command == 'unpackz':
+        parser.add_argument('--max-members', type=positive, help='可选 tar 成员数量上限；超限保留未完成状态')
+        parser.add_argument('--max-output-bytes', type=positive, help='可选展开字节上限；tar 按普通文件声明大小累计')
         mode = parser.add_mutually_exclusive_group()
         mode.add_argument('-C', '--directory', help='按 tar 归档恢复到新目录；显式指定时不依赖文件后缀')
         mode.add_argument('-o', '--output', help='按单个压缩流恢复到新文件；即使名字含 .tar 也不展开归档')
-        parser.epilog = '示例：\n  unpackz table.tsv.zst -o restored.tsv\n  unpackz archive.tar.zst -C restored_project\n\nZIP 仅支持 peek 列表预览，不支持 unpackz 解包。'
+        parser.epilog = '示例：\n  unpackz table.tsv.zst -o restored.tsv\n  unpackz archive.tar.zst -C restored_project\n  unpackz archive.tar.zst -C limited --max-members 100000 --max-output-bytes 10737418240\n  unpackz table.tsv.zst -o limited.tsv --max-output-bytes 104857600\n\n限额为可选正整数，默认不设；超限保留失败状态，不自动清理。\nZIP 仅支持 peek 列表预览，不支持 unpackz 解包。'
     parser.add_argument('input', metavar='FILE' if command != 'packz' else 'PATH', help='待处理的文件' if command != 'packz' else '待压缩的文件或目录')
 
 
@@ -486,11 +531,8 @@ def doctor(args):
         try:
             path = tool(name)
             row['path'] = path
-            with tempfile.TemporaryFile() as output:
-                proc = subprocess.run([path, '--version'], stdin=subprocess.DEVNULL,
-                                      stdout=output, stderr=subprocess.STDOUT, timeout=15)
-                output.seek(0)
-                row['version'] = safe_text(output.read(2048)).strip().splitlines()[:3]
+            proc = run_capture([path, '--version'], timeout=15, limit=2048)
+            row['version'] = safe_text(proc.stdout).strip().splitlines()[:3]
             row['status'] = 'OK' if proc.returncode == 0 else 'ERROR'
             row['exit_code'] = proc.returncode
         except (Error, OSError, ValueError, subprocess.TimeoutExpired) as exc:

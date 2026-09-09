@@ -227,6 +227,7 @@ class Acceptance(unittest.TestCase):
         import json
         standalone=self.p/'standalone';standalone.mkdir()
         shutil.copy2(CLI,standalone/'bio_cli.py')
+        shutil.copy2(ROOT/'bio_runtime.py',standalone/'bio_runtime.py')
         backend=self.p/'backend'
         backend.write_text('#!/bin/sh\nprintf "synthetic version 1.0\\n"\n');backend.chmod(0o755)
         names=['python3','tar','gzip','bzip2','xz','rg','fd','eza','dua','gdu','dust-du','bat','zstd','samtools','bcftools','bgzip']
@@ -243,6 +244,66 @@ class Acceptance(unittest.TestCase):
         result=subprocess.run(args,capture_output=True,timeout=10)
         self.assertNotEqual(result.returncode,0)
         self.assertEqual(next(x for x in json.loads(result.stdout)['checks'] if x['tool']=='rg')['status'],'ERROR')
+
+    def test_restore_limits_and_stream_member_cache(self):
+        spec=importlib.util.spec_from_file_location('stream_cli',CLI)
+        cli=importlib.util.module_from_spec(spec);spec.loader.exec_module(cli)
+        source=self.p/'many.tar'
+        with tarfile.open(source,'w') as archive:
+            for i in range(200):
+                member=tarfile.TarInfo('synthetic_%03d.txt'%i);member.size=10
+                archive.addfile(member,io.BytesIO(b'x'*10))
+        with tarfile.open(source,'r|') as archive:
+            count=0
+            for member in cli.iter_tar(archive):
+                self.assertEqual(len(archive.members),0)
+                self.assertEqual(archive.extractfile(member).read(),b'x'*10)
+                count+=1
+            self.assertEqual(count,200)
+        out=self.p/'limited'
+        self.runcli('unpackz',source,'-C',out,'--max-members','2',ok=False)
+        self.assertEqual(len(list(out.glob('synthetic*'))),2)
+        self.assertTrue((self.p/'limited.bio-cli-incomplete').exists())
+        out=self.p/'bytes'
+        self.runcli('unpackz',source,'-C',out,'--max-output-bytes','9',ok=False)
+        self.assertEqual(len(list(out.glob('synthetic*'))),0)
+        compressed=self.put('single.gz',gzip.compress(b'x'*100))
+        target=self.p/'single.txt'
+        self.runcli('unpackz',compressed,'-o',target,'--max-output-bytes','99',ok=False)
+        self.assertFalse(target.exists())
+        self.runcli('unpackz',compressed,'-o',target,'--max-output-bytes','100')
+        self.assertEqual(target.read_bytes(),b'x'*100)
+
+    def test_directory_metadata_applied_by_depth(self):
+        source=self.p/'unordered.tar'
+        with tarfile.open(source,'w') as archive:
+            file=tarfile.TarInfo('parent/child/data');file.size=1
+            archive.addfile(file,io.BytesIO(b'x'))
+            child=tarfile.TarInfo('parent/child');child.type=tarfile.DIRTYPE;child.mode=0o500
+            archive.addfile(child)
+            parent=tarfile.TarInfo('parent');parent.type=tarfile.DIRTYPE;parent.mode=0
+            archive.addfile(parent)
+        out=self.p/'unordered'
+        try:
+            self.runcli('unpackz',source,'-C',out)
+            self.assertEqual((out/'parent').stat().st_mode & 0o777,0)
+            (out/'parent').chmod(0o700)
+            self.assertEqual((out/'parent/child').stat().st_mode & 0o777,0o500)
+        finally:
+            if (out/'parent').exists():(out/'parent').chmod(0o700)
+            if (out/'parent/child').exists():(out/'parent/child').chmod(0o700)
+
+    def test_timeout_argument_and_terminal_output_paths(self):
+        for value in ['0','-1','nan','inf']:
+            self.runcli('peek','--timeout',value,self.put('timeout.txt'),ok=False)
+        source=self.put('output-\x1b[2J.txt')
+        result=self.runcli('packz',source)
+        self.assertNotIn(b'\x1b',result.stdout)
+        self.assertIn(b'\\x1b',result.stdout)
+        compressed=Path(str(source)+'.zst');target=self.p/'restore-\x1b[2J.txt'
+        result=self.runcli('unpackz',compressed,'-o',target)
+        self.assertEqual(target.read_bytes(),source.read_bytes())
+        self.assertNotIn(b'\x1b',result.stdout)
 
     def test_bam_bcf_cram(self):
         sam=self.put('synthetic.sam',b'@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chrSynthetic\tLN:100\nreadSynthetic\t0\tchrSynthetic\t1\t60\t4M\t*\t0\t0\tACGT\tIIII\n')

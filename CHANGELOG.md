@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.7
+
+- Share owned subprocess-group cleanup and bounded diagnostics across previews, compression, installation and version probes; handle the macOS zombie-group signal race.
+- Add optional preview backend deadlines and restore member/output-byte limits, with explicit limitations and examples.
+- Avoid retaining all tar member objects; apply directory metadata from deepest paths first.
+- Publish downloaded archives and executables without clobbering existing files; reject symlink targets and retain failed partials.
+- Verify managed wrapper content and execute permission before reusing an installed release.
+- Extend synthetic regression coverage for failures, concurrency, resource limits and installation integrity.
+
 ## 0.1.6
 
 - Use an atomic directory lock for installation on shared filesystems without flock/lockf support.

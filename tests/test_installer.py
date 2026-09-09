@@ -14,7 +14,7 @@ class InstallerRegression(unittest.TestCase):
     def test_open_stdin_and_upgrade_are_safe(self):
         with tempfile.TemporaryDirectory(prefix='bio-cli-install-test-') as tmp:
             p=Path(tmp);source=p/'source';source.mkdir()
-            for f in ['bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']:
+            for f in ['bio_runtime.py','tests/test_runtime.py','tests/test_fetch_tools.py','bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']:
                 dest=source/f;dest.parent.mkdir(exist_ok=True,parents=True);shutil.copy2(ROOT/f,dest)
             fake=p/'upstream';fake.mkdir()
             names=['tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip','gdu','dust-du','dua','bat','rg','fd','eza']
@@ -74,6 +74,16 @@ class InstallerRegression(unittest.TestCase):
             self.assertIn(b'Managed wrapper is not a dependency',rejected.stderr)
             self.assertEqual(os.readlink(current),original_target)
 
+            # Reuse must detect altered installed wrappers instead of reporting success.
+            altered=current/'bin/peek'
+            original_body=altered.read_bytes()
+            altered.write_text('#!/bin/sh\nexit 0\n')
+            rejected=subprocess.run(command,env=env,input=b'',capture_output=True,timeout=10)
+            self.assertNotEqual(rejected.returncode,0)
+            self.assertIn(b'Existing release wrapper differs',rejected.stderr)
+            self.assertEqual(os.readlink(current),original_target)
+            altered.write_bytes(original_body)
+
 class InstallerTransactions(unittest.TestCase):
     def test_portable_lock_is_exclusive_and_released(self):
         import importlib.util
@@ -102,7 +112,7 @@ class InstallerTransactions(unittest.TestCase):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory(prefix='bio-cli-transaction-') as tmp:
             p=Path(tmp);source=p/'source';source.mkdir()
-            files=['bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
+            files=['bio_runtime.py','tests/test_runtime.py','tests/test_fetch_tools.py','bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
             for file in files:
                 dest=source/file;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(ROOT/file,dest)
             fake=p/'fake';fake.mkdir()
