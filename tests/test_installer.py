@@ -1,5 +1,6 @@
 """Installer regression tests use isolated synthetic command stubs only."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -9,12 +10,14 @@ import tempfile
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
+spec=importlib.util.spec_from_file_location('source_installer',ROOT/'scripts/install.py')
+installer=importlib.util.module_from_spec(spec);spec.loader.exec_module(installer)
 
 class InstallerRegression(unittest.TestCase):
     def test_open_stdin_and_upgrade_are_safe(self):
         with tempfile.TemporaryDirectory(prefix='bio-cli-install-test-') as tmp:
             p=Path(tmp);source=p/'source';source.mkdir()
-            for f in ['bio_runtime.py','tests/test_runtime.py','tests/test_fetch_tools.py','bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']:
+            for f in installer.FILES:
                 dest=source/f;dest.parent.mkdir(exist_ok=True,parents=True);shutil.copy2(ROOT/f,dest)
             fake=p/'upstream';fake.mkdir()
             names=['tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip','gdu','dust-du','dua','bat','rg','fd','eza']
@@ -43,6 +46,13 @@ class InstallerRegression(unittest.TestCase):
             pos=command.index('--tools-dir');del command[pos:pos+2]
             (source/'VERSION').write_text('0.0.99\n')
             second=run();self.assertNotEqual(first['release_id'],second['release_id'])
+            # The displayed version must follow the installed VERSION, including upgrades.
+            for name in ['bio-cli','peek','packz','unpackz']:
+                output=subprocess.check_output([str(prefix/'bin'/name),'--version'],env=env,timeout=5)
+                self.assertEqual(output,b'bio-cli 0.0.99\n')
+            # Split documentation must survive personal-prefix installation.
+            for file in ['README.md','CHANGELOG.md'] + [f for f in installer.FILES if f.startswith('docs/')]:
+                self.assertEqual((Path(second['release'])/file).read_bytes(),(source/file).read_bytes())
             runtime=json.loads((Path(second['release'])/'runtime.json').read_text())
             self.assertFalse(any('current/bin' in value for value in runtime.values()))
             self.assertNotEqual(runtime['dust-du'],str(prefix/'bin/dust-du'))
@@ -112,7 +122,7 @@ class InstallerTransactions(unittest.TestCase):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory(prefix='bio-cli-transaction-') as tmp:
             p=Path(tmp);source=p/'source';source.mkdir()
-            files=['bio_runtime.py','tests/test_runtime.py','tests/test_fetch_tools.py','bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py','scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
+            files=installer.FILES
             for file in files:
                 dest=source/file;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(ROOT/file,dest)
             fake=p/'fake';fake.mkdir()

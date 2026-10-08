@@ -17,7 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bio_runtime import run_capture
 
 FILES = ['bio_runtime.py','tests/test_runtime.py','tests/test_fetch_tools.py','bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py',
-         'scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py']
+         'scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py','CHANGELOG.md']
+FILES += sorted(path.relative_to(Path(__file__).resolve().parents[1]).as_posix()
+                for path in (Path(__file__).resolve().parents[1] / 'docs').rglob('*.md'))
 OWNED = ['peek','packz','unpackz','dust-du','bio-cli']
 KNOWN = ['python3','tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip',
          'gdu','dust-du','dua','bat','rg','fd','eza']
