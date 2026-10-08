@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep core installation usable when automatically discovered optional staging backends lack execute permission; retain strict required and explicit dependency validation.
+- Distinguish absent optional tools from configured paths that disappear or lose execute permission in doctor.
+
 - Add opt-in `--profile core` installation with six required dependencies and optional format backends; keep full installation as the default.
 - Record profiles in runtime/receipts and distinguish required failures from optional missing/broken tools in doctor.
 - Support core-to-full upgrades with distinct release IDs, preserve legacy full configurations, and reject same-prefix full-to-core switches.

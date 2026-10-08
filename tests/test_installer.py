@@ -321,6 +321,58 @@ class CoreProfileAcceptance(unittest.TestCase):
                       extra=['--tool','samtools='+str(self.fake/'samtools')]).stderr)
         self.assertEqual(os.readlink(current), old_target)
 
+    def test_non_executable_optional_staging_does_not_block_core(self):
+        staging = self.root/'staging'
+        staging.mkdir()
+        for name in ['samtools', 'bcftools', 'bgzip']:
+            path = staging/name
+            path.write_text('#!/bin/sh\nexit 0\n')
+            path.chmod(0o644)
+        record = self.install('core', extra=['--tools-dir', str(staging)])
+        for name in ['samtools', 'bcftools', 'bgzip']:
+            self.assertEqual(record['tools'][name]['status'], 'OPTIONAL_ERROR')
+            self.assertEqual(record['tools'][name]['path'], str(Path(record['release'])/'vendor'/name))
+        report = json.loads(self.command('doctor', '--json').stdout)
+        self.assertTrue(all(row['status']=='OPTIONAL_ERROR' for row in report['checks']
+                            if row['tool'] in ['samtools', 'bcftools', 'bgzip']))
+        text = self.root/'synthetic.txt'
+        text.write_text('synthetic core remains usable\n')
+        self.assertEqual(self.command('peek', text).stdout, text.read_bytes())
+        current = self.prefix/'share/bio-cli/current'
+        before_target = os.readlink(current)
+        before_config = (current/'runtime.json').read_bytes()
+        before_shell = self.shell.read_bytes()
+        # Explicit overrides and full requirements must remain strict.
+        rejected = self.install('core', ok=False, extra=['--tool', 'samtools='+str(staging/'samtools')])
+        self.assertIn(b'Not executable', rejected.stderr)
+        rejected = self.install('full', ok=False, extra=['--tools-dir', str(staging)])
+        self.assertIn(b'Not executable', rejected.stderr)
+        rejected = self.install('core', ok=False, extra=['--tool', 'tar='+str(staging/'samtools')])
+        self.assertIn(b'Not executable', rejected.stderr)
+        self.assertEqual(os.readlink(current), before_target)
+        self.assertEqual((current/'runtime.json').read_bytes(), before_config)
+        self.assertEqual(self.shell.read_bytes(), before_shell)
+
+    def test_configured_optional_backend_failure_is_not_missing(self):
+        backend = self.add_tool('samtools')
+        self.install('core')
+        backend.chmod(0o644)
+        report = json.loads(self.command('doctor', '--json').stdout)
+        row = next(row for row in report['checks'] if row['tool']=='samtools')
+        self.assertEqual(row['status'], 'OPTIONAL_ERROR')
+        self.assertIn(str(backend), row['error'])
+        self.assertEqual(next(row for row in report['checks'] if row['tool']=='bcftools')['status'],
+                         'OPTIONAL_MISSING')
+        # A recorded path that disappears is broken configuration, not a tool
+        # that was absent at installation and may be discovered through PATH.
+        backend.unlink()
+        report = json.loads(self.command('doctor', '--json').stdout)
+        self.assertEqual(next(row for row in report['checks'] if row['tool']=='samtools')['status'],
+                         'OPTIONAL_ERROR')
+        (self.fake/'zstd').chmod(0o644)
+        report = json.loads(self.command('doctor', '--json', ok=False).stdout)
+        self.assertEqual(next(row for row in report['checks'] if row['tool']=='zstd')['status'], 'ERROR')
+
     def test_core_upgrade_activation_failure_restores_entries(self):
         import argparse
         from unittest.mock import patch

@@ -22,7 +22,7 @@ python3 scripts/install.py --profile core --shell-file "$HOME/.bashrc"
 # macOS / Zsh 使用 --shell-file "$HOME/.zshrc"
 ```
 
-BAM/CRAM 记录与头部预览需要 samtools，BCF 需要 bcftools，BGZF 压缩需要 bgzip。核心安装会记录已找到的这三个后端；缺失时不阻断安装，使用对应功能时会明确报出缺少依赖。后续可把后端加入 PATH，无需重装；若安装时已经固定了该后端的路径，应保持它可用。自动发现的可选后端版本检查失败会在安装日志和收据中标为 `OPTIONAL_ERROR`；显式 `--tool` 指定的无效或检查失败路径仍会拒绝安装。
+BAM/CRAM 记录与头部预览需要 samtools，BCF 需要 bcftools，BGZF 压缩需要 bgzip。核心安装会记录已找到的这三个后端；缺失时不阻断安装，使用对应功能时会明确报出缺少依赖。后续可把后端加入 PATH，无需重装；若安装时已经固定了该后端的路径，应保持它可用。自动发现的可选后端版本检查失败（包括 staging 文件没有执行权限）会在安装日志和收据中标为 `OPTIONAL_ERROR`，不阻断核心安装；显式 `--tool` 指定的无效或检查失败路径仍会拒绝安装。
 
 core 不生成配套工具包装器和 `dust-du` 用户入口，不接管已有的搜索或磁盘工具。`bio-cli tools` 仍显示全工具用途，供按需选择。
 
@@ -62,7 +62,7 @@ packz --help
 unpackz --help
 ```
 
-`doctor` 自动读取安装模式，旧版无模式标记的安装按 full 检查。JSON 的 `profile` 与每行 `required` 表明检查口径：必需依赖失败为 `ERROR` 并返回非零；可选缺失为 `OPTIONAL_MISSING`，可选版本检查失败为 `OPTIONAL_ERROR`，均不导致核心检查失败。`bio-cli doctor --profile full` 可以显式检查完整依赖；源码调用默认 full，可用 `--profile core` 检查基础依赖。它只检查路径与版本，不能代替格式能力测试。源码回归测试和环境验收要求见[开发与验证](development.md)。
+`doctor` 自动读取安装模式，旧版无模式标记的安装按 full 检查。JSON 的 `profile` 与每行 `required` 表明检查口径：必需依赖失败为 `ERROR` 并返回非零；没有找到可选工具为 `OPTIONAL_MISSING`，已经固定的可选路径失效、没有执行权限或版本检查失败为 `OPTIONAL_ERROR`，均不导致核心检查失败。使用失效后端对应的功能仍会报错，应修复已记录路径；不会自动改用其他 PATH 中的同名工具。`bio-cli doctor --profile full` 可以显式检查完整依赖；源码调用默认 full，可用 `--profile core` 检查基础依赖。它只检查路径与版本，不能代替格式能力测试。源码回归测试和环境验收要求见[开发与验证](development.md)。
 
 ## 回退与停用
 

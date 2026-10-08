@@ -42,8 +42,10 @@ def runtime_config():
 def tool(name):
     mapping = runtime_config()
     result = mapping.get(name) or shutil.which(name)
-    if not result or not os.access(result, os.X_OK):
+    if not result:
         raise Error('Missing dependency: ' + name + '; install it in a personal environment')
+    if not Path(result).is_file() or not os.access(result, os.X_OK):
+        raise OSError('Not an executable dependency: ' + name + '; ' + result)
     return result
 
 

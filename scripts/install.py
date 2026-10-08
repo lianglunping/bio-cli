@@ -164,7 +164,9 @@ def install_locked(a, source, prefix, base):
                 continue
             raise ValueError('Missing dependency before installation: ' + name)
         if managed(candidate): raise ValueError('Managed wrapper is not a dependency: ' + name)
-        if not Path(candidate).is_file() or not os.access(candidate, os.X_OK):
+        # Auto-discovered optional backends may be present but unusable. Their
+        # probes below record OPTIONAL_ERROR without blocking core activation.
+        if (not Path(candidate).is_file() or not os.access(candidate, os.X_OK)) and (name in required_names or name in overrides):
             raise ValueError('Not executable: ' + candidate)
         runtime[name] = str(Path(candidate).absolute())
     if release.exists():
