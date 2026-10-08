@@ -20,7 +20,7 @@ import zipfile
 
 from bio_runtime import ManagedProcess, run_capture
 
-VERSION = '0.1.7'
+VERSION = (Path(__file__).resolve().parent / 'VERSION').read_text().strip()
 
 LIMIT = 1024 * 1024
 INDEX = ('.bai', '.csi', '.tbi', '.gzi', '.0123', '.bwt.2bit.64', '.pac', '.bwt', '.sa')
@@ -563,7 +563,10 @@ def main():
         parser.add_argument('--version', action='version', version='bio-cli ' + VERSION)
         subparsers = parser.add_subparsers(dest='command', required=True)
         for name in commands:
-            configure_command(subparsers.add_parser(name, prog=name), name)
+            help_text = {'peek': '限量预览文件或归档目录',
+                         'packz': '压缩文件或目录，保留源数据',
+                         'unpackz': '恢复到新的文件或目录'}[name]
+            configure_command(subparsers.add_parser(name, prog=name, help=help_text), name)
         subparsers.add_parser('tools', help='工具用途和常用示例')
         doctor_parser = subparsers.add_parser('doctor', help='只读检查工具路径与版本，不修改环境')
         doctor_parser.add_argument('--json', action='store_true', help='输出本机诊断 JSON；含实际路径，请勿直接公开')

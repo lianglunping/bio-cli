@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Reorganize the README around installation and everyday commands; preserve detailed usage, companion-tool, recovery and development guides under `docs/`.
+- Read CLI and installed release versions from the same `VERSION` file.
+- Include the changelog and split guides in installed releases and their source checksums.
+- Describe preview, compression and restore commands in root help.
+- Run synthetic regressions on Linux (Python 3.8 / 3.12) and macOS (Python 3.12) through GitHub Actions.
+- Extend isolated upgrade acceptance to check command versions and installed documentation.
+
 ## 0.1.7
 
 - Share owned subprocess-group cleanup and bounded diagnostics across previews, compression, installation and version probes; handle the macOS zombie-group signal race.
