@@ -228,6 +228,7 @@ class Acceptance(unittest.TestCase):
         standalone=self.p/'standalone';standalone.mkdir()
         shutil.copy2(CLI,standalone/'bio_cli.py')
         shutil.copy2(ROOT/'bio_runtime.py',standalone/'bio_runtime.py')
+        shutil.copy2(ROOT/'bio_tools.py',standalone/'bio_tools.py')
         shutil.copy2(ROOT/'VERSION',standalone/'VERSION')
         backend=self.p/'backend'
         backend.write_text('#!/bin/sh\nprintf "synthetic version 1.0\\n"\n');backend.chmod(0o755)

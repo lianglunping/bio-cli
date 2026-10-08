@@ -166,4 +166,181 @@ class InstallerTransactions(unittest.TestCase):
             with self.assertRaises(ValueError):module.install(a)
             self.assertFalse((a.prefix/'share/bio-cli/current').exists())
 
+class CoreProfileAcceptance(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='bio-cli-core-')
+        self.root = Path(self.temp.name)
+        self.source = self.root/'source'
+        for file in installer.FILES:
+            target = self.source/file
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT/file, target)
+        self.fake = self.root/'upstream'
+        self.fake.mkdir()
+        self.names = ['tar', 'gzip', 'bzip2', 'xz', 'zstd']
+        for name in self.names:
+            self.add_tool(name)
+        self.prefix = self.root/'prefix'
+        self.shell = self.root/'shellrc'
+        self.shell.write_text('# synthetic original\n')
+        # Only selected synthetic commands are discoverable; no host samtools,
+        # companion binaries, or accidental system dependencies can satisfy this.
+        self.env = dict(os.environ, PATH=str(self.fake))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def add_tool(self, name, exit_code=0):
+        target = self.fake/name
+        target.write_text('#!/bin/sh\nprintf "synthetic '+name+' version 1.0\\n"\nexit '+str(exit_code)+'\n')
+        target.chmod(0o755)
+        return target
+
+    def install(self, profile=None, ok=True, extra=()):
+        command = [sys.executable, str(self.source/'scripts/install.py'),
+                   '--prefix', str(self.prefix), '--shell-file', str(self.shell),
+                   '--tool', 'python3='+sys.executable]
+        if profile is not None:
+            command += ['--profile', profile]
+        result = subprocess.run(command+list(extra), env=self.env, capture_output=True, timeout=15)
+        if ok:
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            return json.loads(result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(b'Traceback', result.stderr)
+        return result
+
+    def command(self, *args, ok=True):
+        result = subprocess.run([str(self.prefix/'bin/bio-cli')]+list(map(str,args)),
+                                env=self.env, capture_output=True, timeout=15)
+        if ok: self.assertEqual(result.returncode, 0, result.stderr.decode())
+        else: self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(b'Traceback', result.stderr)
+        return result
+
+    def test_core_without_optional_tools_and_profile_diagnostics(self):
+        record = self.install('core')
+        self.assertEqual(record['profile'], 'core')
+        self.assertEqual(set(record['tools']), set(['python3']+self.names))
+        release = Path(record['release'])
+        runtime = json.loads((release/'runtime.json').read_text())
+        self.assertEqual(runtime['_profile'], 'core')
+        self.assertEqual(set(p.name for p in (release/'bin').iterdir()),
+                         {'bio-cli', 'peek', 'packz', 'unpackz', 'zstd'})
+        self.assertFalse((self.prefix/'bin/dust-du').is_symlink())
+        source = self.root/'synthetic.txt'
+        source.write_text('synthetic rice\n')
+        self.assertEqual(self.command('peek', source).stdout, b'synthetic rice\n')
+        bam = self.root/'synthetic.bam';bam.write_bytes(b'synthetic')
+        self.assertIn(b'Missing dependency: samtools', self.command('peek', bam, ok=False).stderr)
+        report = json.loads(self.command('doctor', '--json').stdout)
+        self.assertEqual(report['profile'], 'core')
+        self.assertEqual(sum(row['required'] for row in report['checks']), 6)
+        self.assertTrue(all(row['status']=='OK' for row in report['checks'] if row['required']))
+        self.assertTrue(all(row['status']=='OPTIONAL_MISSING' for row in report['checks'] if not row['required']))
+        # Checking full requirements explicitly still reports failure.
+        self.command('doctor', '--profile', 'full', '--json', ok=False)
+        entry = release/'bin/peek';before = entry.stat().st_mtime_ns
+        self.assertEqual(self.install('core')['release_id'], record['release_id'])
+        self.assertEqual(entry.stat().st_mtime_ns, before)
+        # Missing optional backends can be added to PATH without reinstallation.
+        self.add_tool('samtools')
+        report = json.loads(self.command('doctor', '--json').stdout)
+        self.assertEqual(next(row for row in report['checks'] if row['tool']=='samtools')['status'], 'OK')
+        # A failed optional backend is reported, but required tools still pass.
+        self.add_tool('samtools', 7)
+        report = json.loads(self.command('doctor', '--json').stdout)
+        self.assertEqual(next(row for row in report['checks'] if row['tool']=='samtools')['status'], 'OPTIONAL_ERROR')
+        self.add_tool('zstd', 7)
+        report = json.loads(self.command('doctor', '--json', ok=False).stdout)
+        self.assertEqual(next(row for row in report['checks'] if row['tool']=='zstd')['status'], 'ERROR')
+
+    def test_full_default_and_core_to_full_upgrade(self):
+        shell = self.shell.read_bytes()
+        rejected = self.install(ok=False)
+        self.assertIn(b'Missing dependency before installation: samtools', rejected.stderr)
+        self.assertFalse((self.prefix/'share/bio-cli/current').exists())
+        self.assertEqual(self.shell.read_bytes(), shell)
+        core = self.install('core')
+        for name in ['samtools','bcftools','bgzip','gdu','dust-du','dua','bat','rg','fd','eza']:
+            self.add_tool(name)
+        full = self.install()
+        self.assertEqual(full['profile'], 'full')
+        self.assertNotEqual(core['release_id'], full['release_id'])
+        self.assertEqual(full['previous'], core['release'])
+        self.assertEqual(len(full['tools']), 16)
+        self.assertTrue((self.prefix/'bin/dust-du').is_symlink())
+        self.assertEqual(self.shell.read_text().count('# bio-cli: managed PATH entry'), 1)
+        report = json.loads(self.command('doctor','--json').stdout)
+        self.assertEqual(report['profile'], 'full')
+        self.assertTrue(all(row['required'] and row['status']=='OK' for row in report['checks']))
+        old_target = os.readlink(self.prefix/'share/bio-cli/current')
+        self.assertIn(b'new personal --prefix', self.install('core',ok=False).stderr)
+        self.assertEqual(os.readlink(self.prefix/'share/bio-cli/current'), old_target)
+        self.assertEqual(self.install()['release_id'], full['release_id'])
+        # Releases from before profiles had no metadata key and remain full.
+        config = Path(full['release'])/'runtime.json'
+        legacy = json.loads(config.read_text());legacy.pop('_profile')
+        config.write_text(json.dumps(legacy))
+        self.assertEqual(json.loads(self.command('doctor','--json').stdout)['profile'], 'full')
+        self.assertEqual(self.install()['release_id'], full['release_id'])
+
+    def test_native_core_compression_and_directory_restore(self):
+        tools = {name: shutil.which(name) for name in installer.KNOWN[:6]}
+        tools['python3'] = sys.executable
+        self.assertTrue(all(tools.values()), 'Native core dependencies are required for acceptance')
+        self.install('core', extra=[part for name,path in tools.items() for part in ['--tool',name+'='+path]])
+        source = self.root/'synthetic.tsv';source.write_bytes(b'chrSynthetic\t1\tACGT\n')
+        self.command('packz', source)
+        self.command('unpackz', str(source)+'.zst', '-o', self.root/'restored.tsv')
+        self.assertEqual((self.root/'restored.tsv').read_bytes(), source.read_bytes())
+        self.command('packz', '--format', 'gzip', source)
+        self.assertEqual(self.command('peek', str(source)+'.gz').stdout, source.read_bytes())
+        directory = self.root/'project';directory.mkdir()
+        (directory/'data.tsv').write_bytes(source.read_bytes())
+        self.command('packz', directory)
+        self.command('unpackz', str(directory)+'.tar.zst', '-C', self.root/'restored')
+        self.assertEqual((self.root/'restored/project/data.tsv').read_bytes(), source.read_bytes())
+        self.assertTrue(source.exists())
+        self.assertTrue((directory/'data.tsv').exists())
+        self.assertFalse((self.root/'restored.bio-cli-incomplete').exists())
+
+    def test_optional_probe_and_override_validation(self):
+        self.add_tool('samtools', 7)
+        record = self.install('core')
+        self.assertEqual(record['tools']['samtools']['status'], 'OPTIONAL_ERROR')
+        self.assertEqual(self.command('doctor','--json').returncode, 0)
+        current = self.prefix/'share/bio-cli/current';old_target = os.readlink(current)
+        self.assertIn(b'Not executable', self.install('core',ok=False,
+                      extra=['--tool','samtools='+str(self.root/'missing')]).stderr)
+        self.assertEqual(os.readlink(current), old_target)
+        self.assertIn(b'require --profile full', self.install('core',ok=False,
+                      extra=['--tool','rg='+str(self.add_tool('rg'))]).stderr)
+        # Explicit bad overrides must never be silently treated as optional.
+        self.assertIn(b'Version probe failed', self.install('core',ok=False,
+                      extra=['--tool','samtools='+str(self.fake/'samtools')]).stderr)
+        self.assertEqual(os.readlink(current), old_target)
+
+    def test_core_upgrade_activation_failure_restores_entries(self):
+        import argparse
+        from unittest.mock import patch
+        core = self.install('core')
+        for name in ['samtools','bcftools','bgzip','gdu','dust-du','dua','bat','rg','fd','eza']:
+            self.add_tool(name)
+        spec = importlib.util.spec_from_file_location('profile_rollback_installer', self.source/'scripts/install.py')
+        module = importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        args = argparse.Namespace(prefix=self.prefix, shell_file=self.shell, profile='full',
+                                  tools_dir=None, tool=['python3='+sys.executable]+[name+'='+str(self.fake/name) for name in installer.KNOWN if name!='python3'])
+        original = module.atomic_text
+        def fail_receipt(path, text, *args, **kwargs):
+            if path.name=='installation.json' and '"status": "ACTIVE"' in text:
+                raise OSError('synthetic core-to-full activation failure')
+            return original(path,text,*args,**kwargs)
+        with patch.object(module,'atomic_text',side_effect=fail_receipt):
+            with self.assertRaises(OSError):module.install(args)
+        self.assertEqual(os.readlink(self.prefix/'share/bio-cli/current'), core['release'])
+        self.assertFalse((self.prefix/'bin/dust-du').is_symlink())
+        self.assertTrue((self.prefix/'bin/peek').is_file())
+        self.assertEqual(json.loads(self.command('doctor','--json').stdout)['profile'], 'core')
+
 if __name__=='__main__':unittest.main(verbosity=2)

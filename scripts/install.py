@@ -15,14 +15,14 @@ import socket
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bio_runtime import run_capture
+from bio_tools import BIO_TOOLS, KNOWN_TOOLS, PROFILES, required_tools
 
 FILES = ['bio_runtime.py','tests/test_runtime.py','tests/test_fetch_tools.py','bio_cli.py','VERSION','README.md','tools.lock.json','scripts/install.py',
-         'scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py','CHANGELOG.md']
+         'scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py','CHANGELOG.md','bio_tools.py']
 FILES += sorted(path.relative_to(Path(__file__).resolve().parents[1]).as_posix()
                 for path in (Path(__file__).resolve().parents[1] / 'docs').rglob('*.md'))
 OWNED = ['peek','packz','unpackz','dust-du','bio-cli']
-KNOWN = ['python3','tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip',
-         'gdu','dust-du','dua','bat','rg','fd','eza']
+KNOWN = list(KNOWN_TOOLS)
 WRAPPED = ['gdu','dust-du','dua','bat','rg','fd','eza','zstd','samtools','bcftools','bgzip']
 
 
@@ -32,6 +32,8 @@ def wrapper_bodies(runtime, release):
         command = '' if name == 'bio-cli' else ' ' + name
         bodies[name] = '#!/bin/sh\nexec '+shlex.quote(runtime['python3'])+' '+shlex.quote(str(release/'bio_cli.py'))+command+' "$@"\n'
     for name in WRAPPED:
+        if name not in runtime:
+            continue
         extra = {'gdu':' --no-delete --no-spawn-shell -m 2','dua':' -t 2','dust-du':' -T 2'}.get(name,'')
         bodies[name] = '#!/bin/sh\nexec '+shlex.quote(runtime[name])+extra+' "$@"\n'
     return bodies
@@ -86,10 +88,14 @@ def install_lock(base):
 
 
 def install_locked(a, source, prefix, base):
+    profile = getattr(a, 'profile', 'full')
+    required_names = required_tools(profile)
+    selected_names = KNOWN_TOOLS if profile == 'full' else required_names + BIO_TOOLS
+    owned_names = [name for name in OWNED if profile == 'full' or name != 'dust-du']
     current = base/'current'; userbin = prefix/'bin'
     if (current.exists() or current.is_symlink()) and not current.is_symlink():
         raise ValueError('Unmanaged current directory; refusing replacement')
-    for name in OWNED:
+    for name in owned_names:
         link = userbin/name
         if link.exists() or link.is_symlink():
             if not link.is_symlink() or os.readlink(link) != str(current/'bin'/name):
@@ -114,10 +120,14 @@ def install_locked(a, source, prefix, base):
         name, sep, path = value.partition('=')
         if not sep or name not in KNOWN or not Path(path).is_absolute():
             raise ValueError('Use --tool KNOWN_NAME=/absolute/path')
+        if name not in selected_names:
+            raise ValueError('Companion tool overrides require --profile full: ' + name)
         overrides[name] = path
     version = (source/'VERSION').read_text().strip()
     h = hashlib.sha256()
     for file in FILES: h.update(file.encode()); h.update((source/file).read_bytes())
+    if profile != 'full':
+        h.update(('profile=' + profile).encode())
     release_id = version + '-' + h.hexdigest()[:12]
     releases = base/'releases'; releases.mkdir(exist_ok=True)
     release = releases/release_id
@@ -129,6 +139,8 @@ def install_locked(a, source, prefix, base):
                 (resolved.parent.name == 'bin' and resolved.parent.parent.parent == releases))
     old_config = current/'runtime.json'
     previous_runtime = json.loads(old_config.read_text()) if old_config.is_file() else {}
+    if old_config.is_file() and profile == 'core' and previous_runtime.get('_profile', 'full') != 'core':
+        raise ValueError('Switching full to core requires a new personal --prefix; existing entries are preserved')
     def previous(name):
         value = previous_runtime.get(name)
         return value if value and not managed(value) and os.access(value, os.X_OK) else None
@@ -140,26 +152,31 @@ def install_locked(a, source, prefix, base):
                 if not managed(candidate): return str(candidate.absolute())
                 if previous(name): return previous(name)
         return previous(name)
-    runtime = {}
-    for name in KNOWN:
+    runtime = {'_profile': profile}
+    for name in selected_names:
         candidate = overrides.get(name)
         if not candidate and name not in ['gdu','dust-du']: candidate = find(name)
         if not candidate and a.tools_dir and (a.tools_dir/name).is_file():
             candidate = str((a.tools_dir/name).absolute())
         if not candidate: candidate = find(name)
-        if not candidate: raise ValueError('Missing dependency before installation: ' + name)
+        if not candidate:
+            if name not in required_names:
+                continue
+            raise ValueError('Missing dependency before installation: ' + name)
         if managed(candidate): raise ValueError('Managed wrapper is not a dependency: ' + name)
         if not Path(candidate).is_file() or not os.access(candidate, os.X_OK):
             raise ValueError('Not executable: ' + candidate)
         runtime[name] = str(Path(candidate).absolute())
     if release.exists():
         # Incomplete legacy directories cannot be activated. Preserve them for inspection.
-        required = FILES + ['runtime.json'] + ['bin/'+n for n in OWNED+WRAPPED]
+        required = FILES + ['runtime.json'] + ['bin/'+n for n in owned_names]
         if any(not (release/f).is_file() for f in required):
             raise ValueError('Incomplete existing release; retained for inspection: ' + str(release))
         if any((release/f).read_bytes() != (source/f).read_bytes() for f in FILES):
             raise ValueError('Existing release source differs; refusing mutation')
         installed = json.loads((release/'runtime.json').read_text())
+        if installed.get('_profile', 'full') != profile:
+            raise ValueError('Existing release uses a different installation profile')
         for name, value in overrides.items():
             same = name in installed and Path(value).resolve() == Path(installed[name]).resolve()
             if not same and a.tools_dir and name in installed:
@@ -170,15 +187,23 @@ def install_locked(a, source, prefix, base):
         runtime = installed
         for name, body in wrapper_bodies(runtime, release).items():
             entry = release/'bin'/name
-            if entry.read_text() != body or not os.access(entry, os.X_OK):
+            if not entry.is_file() or entry.read_text() != body or not os.access(entry, os.X_OK):
                 raise ValueError('Existing release wrapper differs: ' + name)
     versions = {}
-    for name in KNOWN:
+    for name in selected_names:
+        if name not in runtime and name not in required_names:
+            continue
         if name not in runtime or managed(runtime[name]):
             raise ValueError('Invalid installed dependency: ' + name)
-        result = run_capture([runtime[name], '--version'], timeout=15)
-        if result.returncode: raise ValueError('Version probe failed: ' + name)
-        versions[name] = {'path': runtime[name], 'version': result.stdout.decode('utf-8','replace').splitlines()[:3]}
+        try:
+            result = run_capture([runtime[name], '--version'], timeout=15)
+            if result.returncode: raise ValueError('Version probe failed: ' + name)
+            versions[name] = {'path': runtime[name], 'version': result.stdout.decode('utf-8','replace').splitlines()[:3]}
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            if name in required_names or name in overrides:
+                raise
+            versions[name] = {'path': runtime[name], 'status': 'OPTIONAL_ERROR', 'error': str(exc)}
+            print('Optional dependency probe failed: ' + name + '; ' + str(exc), file=sys.stderr)
     if not release.exists():
         staging = Path(tempfile.mkdtemp(prefix='.build-'+release_id+'-', dir=str(releases)))
         try:
@@ -186,7 +211,9 @@ def install_locked(a, source, prefix, base):
                 dest = staging/file; dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source/file, dest)
             if a.tools_dir:
-                for name in KNOWN:
+                for name in selected_names:
+                    if name not in runtime:
+                        continue
                     if Path(runtime[name]).parent == a.tools_dir.absolute():
                         dest = staging/'vendor'/name; dest.parent.mkdir(exist_ok=True)
                         shutil.copy2(runtime[name], dest)
@@ -204,17 +231,17 @@ def install_locked(a, source, prefix, base):
         except BaseException:
             print('Build failed; inactive staging retained at ' + str(staging), file=sys.stderr)
             raise
-    for name in KNOWN: versions[name]['path'] = runtime[name]
+    for name in versions: versions[name]['path'] = runtime[name]
     # Do not rewrite an existing complete release, including its active wrappers.
     previous_target = os.readlink(current) if current.is_symlink() else None
     receipt = state/'installation.json'
     old_receipt = receipt.read_text() if receipt.exists() else None
     record = {'release_id':release_id, 'release':str(release), 'previous':previous_target,
-              'tools':versions, 'shell_file':str(shell) if shell else None, 'status':'PREPARED'}
+              'profile':profile, 'tools':versions, 'shell_file':str(shell) if shell else None, 'status':'PREPARED'}
     userbin.mkdir(exist_ok=True)
     added = []; shell_changed = False; activated = False
     try:
-        for name in OWNED:
+        for name in owned_names:
             link = userbin/name
             if not (link.exists() or link.is_symlink()):
                 link.symlink_to(current/'bin'/name); added.append(link)
@@ -253,6 +280,8 @@ def install_locked(a, source, prefix, base):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prefix', type=Path, default=Path.home()/'.local')
+    parser.add_argument('--profile', choices=PROFILES, default='full',
+                        help='full: 完整工具组合（默认）；core: 六项基础依赖，生信后端可选')
     parser.add_argument('--tools-dir', type=Path)
     parser.add_argument('--tool', action='append', default=[], help='NAME=/absolute/path')
     parser.add_argument('--shell-file', type=Path)

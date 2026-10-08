@@ -14,21 +14,29 @@
 
 ## 安装
 
-从源码安装到个人目录。先准备 `python3`、`tar`、`gzip`、`bzip2`、`xz`、`zstd`、`samtools`、`bcftools` 和 `bgzip`；安装器要求完整工具组合，下载器提供锁定版本的配套工具。详细依赖、覆盖路径及升级规则见[安装指南](docs/installation.md)。
+从源码安装到个人目录。核心安装需要 `python3`、`tar`、`gzip`、`bzip2`、`xz`、`zstd` 六项依赖；默认的完整安装另需生信后端与配套工具。详细依赖、覆盖路径及升级规则见[安装指南](docs/installation.md)。
 
 ```sh
 git clone https://github.com/lianglunping/bio-cli.git
 cd bio-cli
 ```
 
-**Linux x86_64 / Bash：**
+**只使用核心命令：** 准备上述六项依赖后执行，无需下载整套配套工具。
+
+```sh
+python3 scripts/install.py --profile core --shell-file "$HOME/.bashrc"
+```
+
+macOS / Zsh 将 Shell 文件改为 `$HOME/.zshrc`。BAM/CRAM、BCF 与 BGZF 压缩按需准备 samtools、bcftools、bgzip；`doctor` 会区分必需依赖和可选工具。
+
+**完整安装：Linux x86_64 / Bash：**
 
 ```sh
 python3 scripts/fetch_tools.py --platform linux-x86_64 --destination "$HOME/tool_staging"
 python3 scripts/install.py --tools-dir "$HOME/tool_staging/bin" --shell-file "$HOME/.bashrc"
 ```
 
-**macOS arm64 / Zsh：** 先在个人环境准备 `eza`（下载清单不含 macOS eza），再执行：
+**完整安装：macOS arm64 / Zsh：** 先在个人环境准备 `eza`（下载清单不含 macOS eza），再执行：
 
 ```sh
 python3 scripts/fetch_tools.py --platform darwin-arm64 --destination "$HOME/tool_staging"
