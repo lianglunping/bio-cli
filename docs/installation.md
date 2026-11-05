@@ -35,6 +35,44 @@ python3 scripts/install.py --tools-dir "$HOME/tool_staging/bin" --shell-file "$H
 
 不希望改动 Shell 文件时可省略 `--shell-file`，安装后手动把所选 prefix 的 `share/bio-cli/current/bin` 加入 PATH。Linux 和 macOS 的完整分步示例见[首页](../README.md#安装)。
 
+<a id="ssh-batch-path"></a>
+
+## 非交互 SSH 和批处理脚本的 PATH
+
+默认安装会在 `$HOME/.local/bin` 创建 `bio-cli`、`peek`、`packz` 和 `unpackz` 入口。若交互终端能运行命令，而 `ssh` 远程执行时提示找不到命令，请**在远端**配置 PATH。自定义安装前缀时，把下面的 `$HOME/.local/bin` 换成该前缀的 `bin` 目录。
+
+**远端登录 Shell 是 Zsh 时**，将以下片段加入 `~/.zshenv`（设置了 `ZDOTDIR` 时用该目录下的 `.zshenv`）。非交互 Zsh 也会读取这个文件。片段只在目录缺失时追加，保留已有命令的查找顺序。
+
+```sh
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="${PATH:+$PATH:}$HOME/.local/bin" ;;
+esac
+```
+
+**远端登录 Shell 是 Bash 时**，若非交互 SSH 会读取 `~/.bashrc`，把同一片段放在其中“非交互时提前 return”的判断**之前**。从已配置会话启动的 Bash 或 sh 脚本会继承 PATH。对于使用独立环境的调度器或 cron，可将同一片段放入统一的作业启动脚本，由该入口启动批处理任务。
+
+**可选归档工具**也要能从作业的 PATH 找到。若合适的 `bsdtar` 仅在某个软件环境中可见，可先在远端进入该环境，核对 `command -v bsdtar` 和 `bsdtar --version`，再为这个可执行文件创建个人入口。例如，确认 `$HOME/.local/bin/bsdtar` 尚未占用后运行：
+
+```sh
+ln -s "$(command -v bsdtar)" "$HOME/.local/bin/bsdtar"
+```
+
+如果依赖原本已在 PATH 中，直接使用即可。创建 RAR 还需要 `rar`，严格解包需要 RARLAB 的 `unrar` 或 `rar`。[归档工具与版本要求](#可选归档工具)
+
+**验证时新开连接**。在本机将 `SSH_TARGET` 设为自己的 SSH 连接目标，然后运行以下命令。第一条检查远端实际选中的入口和版本，第二条检查无终端的子脚本能否直接运行安装后的命令。
+
+```sh
+ssh -T "$SSH_TARGET" 'command -v bio-cli && bio-cli --version'
+ssh -T "$SSH_TARGET" 'sh -s' <<'BATCH'
+set -e
+command -v packz
+command -v unpackz
+packz --version
+unpackz --version
+BATCH
+```
+
 ## 升级与失败恢复
 
 升级会识别 `current/bin` 和个人 `bin` 中的托管入口，复用其真实依赖，避免包装器调用自身。安装通过原子创建互斥目录锁定同一 prefix，不依赖共享文件系统可能不支持的 flock/lockf；另一个安装器遇到锁时明确退出。锁内记录主机和 PID；强制终止可能遗留锁，必须确认原安装器已经停止后再人工恢复，安装器不会自动夺取或删除已有锁。安装器先在独立临时目录构建并检查入口，再发布完整 release；构建失败保留未激活临时目录，重试使用新的临时目录。完整 release 复用时校验托管入口的内容和可执行权限，不重写入口；被改动的入口会使重装在激活前失败。激活和 Shell/收据处理若抛出异常，会尝试恢复旧 current、配置及本次新建入口，失败细节保存在安装状态目录；突然断电或强制终止不等于可捕获异常，恢复前仍须检查 current 和收据状态。

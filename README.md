@@ -35,7 +35,7 @@ python3 scripts/fetch_tools.py --platform darwin-arm64 --destination "$HOME/tool
 python3 scripts/install.py --tools-dir "$HOME/tool_staging/bin" --tool "eza=$(command -v eza)" --shell-file "$HOME/.zshrc"
 ```
 
-重新打开终端或 SSH 会话，然后运行 `bio-cli --version` 和 `bio-cli doctor`。默认入口位于 `$HOME/.local/share/bio-cli/current/bin`。Shell 文件按实际环境选择；自定义安装目录、缺失依赖和 PATH 问题见[安装指南](docs/installation.md)。
+重新打开终端或 SSH 会话，然后运行 `bio-cli --version` 和 `bio-cli doctor`。默认入口位于 `$HOME/.local/share/bio-cli/current/bin`。远程命令或作业脚本中找不到 `packz` 时，见[非交互 SSH 和批处理脚本的 PATH 配置](docs/installation.md#ssh-batch-path)。Shell 文件按实际环境选择；自定义安装目录、缺失依赖和 PATH 问题见[安装指南](docs/installation.md)。
 
 ## 常用命令
 
