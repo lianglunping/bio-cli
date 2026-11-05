@@ -63,7 +63,8 @@ def container_format(path):
     # Never pass arbitrary data to bsdtar: it also recognizes filesystem manifests.
     with path.open('rb') as stream:
         magic = stream.read(8)
-    signatures = {'rar': (b'Rar!\x1a\x07\x00', b'Rar!\x1a\x07\x01\x00'),
+    signatures = {'rar': (b'Rar!\x1a\x07\x00',),
+                  'rar5': (b'Rar!\x1a\x07\x01\x00',),
                   '7z': (b'7z\xbc\xaf\x27\x1c',),
                   'zip': (b'PK\x03\x04', b'PK\x05\x06')}
     for fmt, prefixes in signatures.items():
@@ -170,7 +171,7 @@ def peek(args):
     fmt = container_format(path)
     if fmt is None and name.endswith(('.rar', '.7z')):
         raise Error('Invalid or unsupported archive signature: ' + path.name)
-    if fmt in ('rar', '7z'):
+    if fmt in ('rar', 'rar5', '7z'):
         with reader(path, [tool('bsdtar'), '-tf', str(path)], timeout=args.timeout) as r:
             listing = preview_stream(r, args.lines, args.max_bytes)
             truncated = r.truncated
@@ -435,7 +436,8 @@ def rar_verifier():
 def unpack(args):
     source = regular(args.input)
     fmt = container_format(source)
-    if args.verify_rar and (fmt != 'rar' or not args.directory):
+    is_rar = fmt in ('rar', 'rar5')
+    if args.verify_rar and (not is_rar or not args.directory):
         raise Error('--verify-rar requires a RAR archive and -C <new-directory>')
     if args.verify_rar:
         if any(char in str(source) for char in '*?'):
@@ -447,7 +449,15 @@ def unpack(args):
     if args.directory or (not args.output and (fmt or source.name.lower().endswith(ARCHIVES))):
         if not args.directory: raise Error('Directory archives require -C <new-directory>')
         # Preserve absolute member names for rejection by the safe restore path.
-        command = [tool('bsdtar'), '-cPf', '-', '--format', 'pax', '@' + str(source)] if fmt else None
+        command = None
+        if fmt:
+            backend = tool('bsdtar')
+            if fmt == 'rar5':
+                version = run_capture([backend, '--version'])
+                linked = re.search(rb'\blibarchive (\d+)\.(\d+)\.(\d+)', version.stdout)
+                if version.returncode or not linked or tuple(map(int, linked.groups())) < (3, 7, 4):
+                    raise Error('RAR5 restore requires bsdtar linked to libarchive 3.7.4+; check bsdtar --version')
+            command = [backend, '-cPf', '-', '--format', 'pax', '@' + str(source)]
         root = Path(args.directory).absolute()
         status = root.with_name(root.name + '.bio-cli-incomplete')
         # A sibling marker remains writable even if archive metadata makes root read-only.
@@ -500,7 +510,7 @@ def unpack(args):
                 pass
             print(safe_text(('unpackz: incomplete restore; status at ' + str(status)).encode('utf-8', 'replace')), file=sys.stderr)
             raise
-        if fmt == 'rar' and not args.verify_rar:
+        if is_rar and not args.verify_rar:
             print('unpackz: RAR decoded without an independent checksum test; use --verify-rar to require one', file=sys.stderr)
         print(safe_text(str(root).encode('utf-8', 'replace')))
     else:

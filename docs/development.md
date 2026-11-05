@@ -28,7 +28,7 @@ unpackz --help
 
 ## 自动回归
 
-`.github/workflows/tests.yml` 在主分支推送、PR 和手动触发时运行完整测试：Ubuntu 22.04 的 Python 3.8 / 3.12，以及 macOS 14 的 Python 3.12。CI 安装原生测试依赖并打印实际版本；测试不使用研究数据，不通过跳过用例掩盖缺失依赖。依赖由 runner 的包管理器提供，版本可能变化，以每次 CI 日志为准；CI 不等同于指定 HPC 环境的部署验收。
+`.github/workflows/tests.yml` 在主分支推送、PR 和手动触发时运行完整测试：Ubuntu 22.04 的 Python 3.8 / 3.12，以及 macOS 14 的 Python 3.12。CI 安装原生测试依赖并打印实际版本；测试不使用研究数据，不通过跳过用例掩盖缺失依赖。Ubuntu 另测系统 libarchive 3.6.0 的 RAR5 拒绝路径，并用校验过的 libarchive 3.8.11 源码构建 bsdtar 运行完整测试。其余依赖由 runner 的包管理器提供，版本可能变化，以每次 CI 日志为准；CI 不等同于指定 HPC 环境的部署验收。
 
 新增命令或修改文件行为时应同时更新用法、合成回归和安装文件清单。安装后的 README、CHANGELOG 与 `docs/` 也纳入 release 校验。文档中的相对链接应在源码与安装 release 中均有效。
 

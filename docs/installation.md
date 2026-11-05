@@ -15,7 +15,7 @@ cd bio-cli
 
 ## 可选归档工具
 
-处理 ZIP、7z、RAR 归档时按需从 PATH 查找 `bsdtar`。macOS 可先运行 `bsdtar --version`；Debian/Ubuntu 使用 `libarchive-tools` 包。原有 ZIP 列表预览只需 Python。创建 RAR 还需自行准备适合平台及许可条件的 [RARLAB 命令行 rar](https://www.rarlab.com/download.htm)，并加入 PATH。严格恢复模式 `--verify-rar` 可使用 RARLAB 的 `unrar` 或 `rar`；同名的 `unrar-free` 不用于独立校验。安装器不会分发这些可选工具，基础安装不依赖它们。
+处理 ZIP、7z、RAR 归档时按需从 PATH 查找 `bsdtar`。macOS 可先运行 `bsdtar --version`；Debian/Ubuntu 使用 `libarchive-tools` 包。RAR5 解包要求 `bsdtar --version` 显示其链接的 **libarchive ≥ 3.7.4**。Ubuntu 22.04 自带的 3.6.0 在压缩 RAR5 样本上曾无报错地写出错误字节；请将符合版本要求的 bsdtar 加入 PATH 后再恢复。macOS 使用 Homebrew libarchive 时可执行 `export PATH="$(brew --prefix libarchive)/bin:$PATH"`。原有 ZIP 列表预览只需 Python。创建 RAR 还需自行准备适合平台及许可条件的 [RARLAB 命令行 rar](https://www.rarlab.com/download.htm)，并加入 PATH。严格恢复模式 `--verify-rar` 可使用 RARLAB 的 `unrar` 或 `rar`；同名的 `unrar-free` 不用于独立校验。安装器不会分发这些可选工具，基础安装不依赖它们。
 
 ## 下载与安装
 

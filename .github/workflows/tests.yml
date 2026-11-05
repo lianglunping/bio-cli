@@ -40,9 +40,26 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y zstd samtools bcftools tabix gzip bzip2 xz-utils libarchive-tools
+      - name: Check old system RAR5 backend and build supported bsdtar
+        if: runner.os == 'Linux'
+        run: |
+          if bsdtar --version | grep -q 'libarchive 3.6.0'; then
+            if python bio_cli.py unpackz tests/fixtures/test_read_format_rar5_compressed.rar -C "$RUNNER_TEMP/unsafe" 2>"$RUNNER_TEMP/refusal"; then exit 1; fi
+            grep -F 'libarchive 3.7.4+' "$RUNNER_TEMP/refusal"
+            test ! -e "$RUNNER_TEMP/unsafe"
+          fi
+          cd "$RUNNER_TEMP"
+          curl -fsSL https://github.com/libarchive/libarchive/releases/download/v3.8.11/libarchive-3.8.11.tar.xz -o libarchive.tar.xz
+          echo 'a3dc0872b1b39da34dc18ef1b944f0f11ffd37425d70ae04be679279f1cf43d2  libarchive.tar.xz' | sha256sum -c -
+          tar xf libarchive.tar.xz
+          cmake -S libarchive-3.8.11 -B archive-build -DENABLE_TEST=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build archive-build --target bsdtar --parallel 4
+          echo "$RUNNER_TEMP/archive-build/bin" >> "$GITHUB_PATH"
       - name: Install macOS test dependencies
         if: runner.os == 'macOS'
-        run: brew install zstd samtools bcftools htslib gzip xz
+        run: |
+          brew install zstd samtools bcftools htslib gzip xz libarchive
+          echo "$(brew --prefix libarchive)/bin" >> "$GITHUB_PATH"
       - name: Record native dependency versions
         shell: bash
         run: |
