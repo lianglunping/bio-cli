@@ -13,6 +13,10 @@ cd bio-cli
 
 以下安装器要求完整工具组合，下载器只提供 `tools.lock.json` 中锁定的配套工具；它不会安装 samtools/bcftools/HTSlib 等依赖。先在个人环境准备依赖，再按平台选择下载与安装命令。下载清单支持 `linux-x86_64` 和 `darwin-arm64`；其他架构未提供下载清单。
 
+## 可选归档工具
+
+处理 ZIP、7z、RAR 归档时按需从 PATH 查找 `bsdtar`。macOS 可先运行 `bsdtar --version`；Debian/Ubuntu 使用 `libarchive-tools` 包。原有 ZIP 列表预览只需 Python。创建 RAR 还需自行准备适合平台及许可条件的 [RARLAB 命令行 rar](https://www.rarlab.com/download.htm)，并加入 PATH。严格恢复模式 `--verify-rar` 可使用 RARLAB 的 `unrar` 或 `rar`；同名的 `unrar-free` 不用于独立校验。安装器不会分发这些可选工具，基础安装不依赖它们。
+
 ## 下载与安装
 
 依赖：`python3`, `tar`, `gzip`, `bzip2`, `xz`, `zstd`, `samtools`, `bcftools`, `bgzip`。完整工具组合另含 `gdu`, `dust-du`, `dua`, `bat`, `rg`, `fd`, `eza`。本项目不执行系统级包安装，不修改 Conda base，不替换传统 `du/cat/ls`。
@@ -22,7 +26,7 @@ python3 scripts/fetch_tools.py --platform linux-x86_64 --destination "$HOME/tool
 python3 scripts/install.py --tools-dir "$HOME/tool_staging/bin" --shell-file "$HOME/.bashrc"
 # macOS 使用 --platform darwin-arm64，Shell 文件按实际选择 .zshrc。
 # 无官方 macOS eza 二进制时，先在个人环境安装 eza，再用 --tool eza=/path/to/eza 指定。
-# 所有依赖都支持 --tool NAME=/path/to/executable；--prefix 可指定个人安装目录。
+# 安装器管理的依赖支持 --tool NAME=/path/to/executable；--prefix 可指定个人安装目录。
 ```
 
 下载清单固定官方发布版本和 SHA-256。下载与可执行文件提取均写入唯一临时文件，校验后以硬链接不覆盖发布；拒绝目标符号链接，不替换不同内容的已有文件，相同内容可复用。中断或校验失败保留临时文件，重试重新下载，不自动续传或清理失败文件。下载工具只提取预期可执行文件；原始归档留在用户指定的 staging 中。安装器复用可用工具，缺失工具可来自 staging。安装前检查版本，独立保留每个 release，生成的 `runtime.json` 和安装记录仅在本机。Shell 仅添加一段 PATH，并保存原文件备份。公开仓库不会包含这些本地记录。

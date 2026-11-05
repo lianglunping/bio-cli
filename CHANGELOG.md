@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add `unpackz --verify-rar` to require an independent RARLAB integrity test before completing a restore.
+
+- Create and safely restore ZIP, 7z and single-volume RAR archives using optional native tools. Add xz, bzip2, plain tar and compressed tar output formats.
+
 - Reorganize the README around installation and everyday commands; preserve detailed usage, companion-tool, recovery and development guides under `docs/`.
 - Read CLI and installed release versions from the same `VERSION` file.
 - Include the changelog and split guides in installed releases and their source checksums.

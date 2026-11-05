@@ -39,7 +39,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y zstd samtools bcftools tabix gzip bzip2 xz-utils
+          sudo apt-get install -y zstd samtools bcftools tabix gzip bzip2 xz-utils libarchive-tools
       - name: Install macOS test dependencies
         if: runner.os == 'macOS'
         run: brew install zstd samtools bcftools htslib gzip xz
@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: |
           python --version
-          for tool in tar gzip bzip2 xz zstd samtools bcftools bgzip; do
+          for tool in bsdtar tar gzip bzip2 xz zstd samtools bcftools bgzip; do
             command -v "$tool"
             "$tool" --version </dev/null
           done

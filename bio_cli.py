@@ -59,6 +59,19 @@ def compression(path):
     return None
 
 
+def container_format(path):
+    # Never pass arbitrary data to bsdtar: it also recognizes filesystem manifests.
+    with path.open('rb') as stream:
+        magic = stream.read(8)
+    signatures = {'rar': (b'Rar!\x1a\x07\x00', b'Rar!\x1a\x07\x01\x00'),
+                  '7z': (b'7z\xbc\xaf\x27\x1c',),
+                  'zip': (b'PK\x03\x04', b'PK\x05\x06')}
+    for fmt, prefixes in signatures.items():
+        if magic.startswith(prefixes):
+            return fmt
+    return None
+
+
 class Reader:
     """Bounded diagnostic capture; timeout applies to the owned backend group."""
     def __init__(self, path, command=None, env=None, timeout=None):
@@ -154,7 +167,15 @@ def peek(args):
     if name.endswith(INDEX + SPECIAL):
         print(safe_text(('Metadata only: %s\nSize: %d bytes\nClass: %s' % (path.name, path.stat().st_size, 'binary index' if name.endswith(INDEX) else 'specialized binary format')).encode('utf-8', 'replace')))
         return
-    if name.endswith('.zip'):
+    fmt = container_format(path)
+    if fmt is None and name.endswith(('.rar', '.7z')):
+        raise Error('Invalid or unsupported archive signature: ' + path.name)
+    if fmt in ('rar', '7z'):
+        with reader(path, [tool('bsdtar'), '-tf', str(path)], timeout=args.timeout) as r:
+            listing = preview_stream(r, args.lines, args.max_bytes)
+            truncated = r.truncated
+        display(listing, args.no_pager)
+    elif fmt == 'zip' or name.endswith('.zip'):
         with zipfile.ZipFile(path) as z:
             result = bytearray()
             truncated = False
@@ -210,6 +231,8 @@ def peek(args):
 def compressor(fmt, threads, level):
     if fmt == 'zstd': return [tool('zstd'), '-q', '-c', '-T' + str(threads), '-' + str(level)]
     if fmt == 'gzip': return [tool('gzip'), '-c', '-n', '-' + str(min(level, 9))]
+    if fmt in ('xz', 'bzip2'):
+        return [tool(fmt), '-c', '-' + str(min(level, 9))] + (['-T' + str(threads)] if fmt == 'xz' else [])
     return [tool('bgzip'), '-c', '-@', str(threads), '-l', str(min(level, 9))]
 
 
@@ -219,7 +242,7 @@ def publish(partial, target):
     partial.unlink()
 
 
-def validate_pack_tree(source):
+def validate_pack_tree(source, portable=False):
     """Reject members our safe restore cannot reproduce; never follow links."""
     root = source.resolve()
     member_path(source.name)
@@ -229,6 +252,8 @@ def validate_pack_tree(source):
         member_path(str(path.relative_to(source)))
         mode = path.lstat().st_mode
         if stat.S_ISLNK(mode):
+            if portable:
+                raise Error('Use tar to archive symbolic links: ' + str(path))
             value = os.readlink(path)
             if os.path.isabs(value):
                 raise Error('Directory contains an absolute symbolic link: ' + str(path))
@@ -244,14 +269,64 @@ def validate_pack_tree(source):
             check(Path(parent) / name)
 
 
+STREAM_SUFFIX = {'gzip': '.gz', 'xz': '.xz', 'zstd': '.zst', 'bzip2': '.bz2', 'bgzip': '.gz'}
+TAR_CODEC = {'tar.gz': 'gzip', 'tar.xz': 'xz', 'tar.bz2': 'bzip2', 'tar.zst': 'zstd'}
+
+
+def checked_backend(command, **kwargs):
+    process = ManagedProcess(command, **kwargs)
+    if process.finish():
+        raise Error(process.errors.data.decode('utf-8', 'replace').strip() or ('%s failed with exit code %d' % (Path(command[0]).name, process.proc.returncode)))
+
+
+def pack_container(source, target, fmt, level):
+    native = tool('rar' if fmt == 'rar' else 'bsdtar')
+    if fmt == 'rar' and any(char in source.name for char in '*?'):
+        raise Error('RAR input name contains a wildcard')
+    member_path(source.name)
+    if source.name == '.bio-cli-incomplete':
+        raise Error('Source name conflicts with the restore status marker')
+    staging = Path(tempfile.mkdtemp(prefix=target.name + '.partial-', dir=str(target.parent)))
+    partial = staging / ('archive.' + fmt)
+    before = source.stat()
+    try:
+        operand = './' + source.name
+        if fmt == 'rar':
+            checked_backend([native, 'a', '-cfg-', '-idq', '-ma5', '-m' + str(min(level, 5)),
+                             '--', str(partial), operand], cwd=source.parent, stdout=subprocess.DEVNULL)
+            check = [native, 't', '-cfg-', '-idq', '-p-', '--', str(partial)]
+        else:
+            command = [native, '-cf', str(partial), '--format', '7zip' if fmt == '7z' else fmt,
+                       '--options', 'compression-level=' + str(min(level, 9)), '--', operand]
+            checked_backend(command, cwd=source.parent, stdout=subprocess.DEVNULL,
+                            env=dict(os.environ, COPYFILE_DISABLE='1'))
+            check = [native, '-xOf', str(partial)]
+        checked_backend(check, stdout=subprocess.DEVNULL)
+        after = source.stat()
+        if source.is_file() and (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+            raise Error('Source changed during compression')
+        publish(partial, target)
+        staging.rmdir()
+    except BaseException:
+        print(safe_text(('packz: incomplete output retained at ' + str(staging)).encode()), file=sys.stderr)
+        raise
+
+
 def pack(args):
     source = Path(args.input).absolute()
     if source.is_symlink() or not (source.is_file() or source.is_dir()):
         raise Error('Input must be a regular file or directory, not a top-level symbolic link')
     is_dir = source.is_dir()
-    if is_dir and args.format != 'zstd':
-        raise Error('Directory archives use zstd (.tar.zst) in this version')
-    suffix = '.tar.zst' if is_dir else '.zst' if args.format == 'zstd' else '.gz'
+    fmt = args.format
+    codec = TAR_CODEC.get(fmt, fmt)
+    container = fmt in ('zip', '7z', 'rar')
+    as_tar = fmt == 'tar' or fmt in TAR_CODEC or (is_dir and not container)
+    if is_dir and fmt == 'bgzip':
+        raise Error('BGZF compression requires a single file')
+    if container or fmt == 'tar':
+        suffix = '.' + fmt
+    else:
+        suffix = ('.tar' if as_tar else '') + STREAM_SUFFIX[codec]
     target = Path(args.output).absolute() if args.output else source.with_name(source.name + suffix)
     if target.exists() or target.is_symlink(): raise Error('Output already exists: ' + str(target))
     if not target.parent.is_dir(): raise Error('Output parent directory does not exist')
@@ -259,16 +334,28 @@ def pack(args):
         raise Error('Archive output must be outside the source directory')
     if not is_dir and source.name.lower().endswith(('.gz', '.zst', '.xz', '.bz2', '.bam', '.cram', '.bcf', '.zip')):
         print('packz: input is already compressed; additional compression may save little space', file=sys.stderr)
+    if as_tar and not is_dir:
+        member_path(source.name)
+        if source.name == '.bio-cli-incomplete':
+            raise Error('Source name conflicts with the restore status marker')
     if is_dir:
-        validate_pack_tree(source)
-    command = compressor(args.format, args.threads, args.level)
+        validate_pack_tree(source, portable=container)
+    if container:
+        pack_container(source, target, fmt, args.level)
+        print(safe_text(str(target).encode('utf-8', 'replace')))
+        return
+    command = compressor(codec, args.threads, args.level) if fmt != 'tar' else None
     fd, name = tempfile.mkstemp(prefix=target.name + '.partial-', dir=str(target.parent))
     partial = Path(name)
     try:
         with os.fdopen(fd, 'wb') as out:
-            if is_dir:
+            before = None if is_dir else source.stat()
+            if fmt == 'tar':
+                checked_backend([tool('tar'), '-cf', '-', '-C', str(source.parent), '--', './' + source.name],
+                                stdout=out, env=dict(os.environ, COPYFILE_DISABLE='1'))
+            elif as_tar:
                 env = os.environ.copy(); env['COPYFILE_DISABLE'] = '1'
-                tar = ManagedProcess([tool('tar'), '-cf', '-', '-C', str(source.parent), '--', source.name], env=env)
+                tar = ManagedProcess([tool('tar'), '-cf', '-', '-C', str(source.parent), '--', './' + source.name], env=env)
                 try:
                     process = ManagedProcess(command, stdin=tar.stdout, stdout=out)
                     result = process.finish()
@@ -278,16 +365,19 @@ def pack(args):
                     tar.finish(cancel=True)
                 if result or tarcode: raise Error('Archive/compressor failed; partial output retained')
             else:
-                before = source.stat()
                 with source.open('rb') as inp:
                     process = ManagedProcess(command, stdin=inp, stdout=out)
                     result = process.finish()
-                after = source.stat()
                 if result: raise Error('Compressor failed; partial output retained')
+            if before is not None:
+                after = source.stat()
                 if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
                     raise Error('Source changed during compression; partial output retained')
             out.flush(); os.fsync(out.fileno())
-        check = [tool('zstd' if args.format == 'zstd' else 'gzip'), '-t', str(partial)]
+        if fmt == 'tar':
+            check = [tool('tar'), '-tf', str(partial)]
+        else:
+            check = [tool('gzip' if codec == 'bgzip' else codec), '-t', str(partial)]
         if ManagedProcess(check, stdout=subprocess.DEVNULL).finish(): raise Error('Compressed stream integrity test failed')
         publish(partial, target)
     except BaseException:
@@ -332,10 +422,32 @@ def extract_member(archive, member, root, directories):
         raise Error('Special device/FIFO archive member refused')
 
 
+def rar_verifier():
+    # Some systems install a libarchive-based unrar-free as "unrar". That
+    # would repeat the same decoder instead of independently checking the RAR.
+    for name in ('unrar', 'rar'):
+        path = shutil.which(name)
+        if path and re.search(rb'^\s*(?:UNRAR|RAR) \d+\.\d+.*Roshal', run_capture([path]).stdout, re.M):
+            return path
+    raise Error('--verify-rar requires RARLAB unrar or rar on PATH')
+
+
 def unpack(args):
     source = regular(args.input)
-    if args.directory or (not args.output and source.name.lower().endswith(ARCHIVES)):
+    fmt = container_format(source)
+    if args.verify_rar and (fmt != 'rar' or not args.directory):
+        raise Error('--verify-rar requires a RAR archive and -C <new-directory>')
+    if args.verify_rar:
+        if any(char in str(source) for char in '*?'):
+            raise Error('RAR verifier treats * and ? in archive paths as wildcards')
+        verifier = rar_verifier()
+        original = source.stat()
+    if fmt and args.output:
+        raise Error('Directory archives require -C <new-directory>')
+    if args.directory or (not args.output and (fmt or source.name.lower().endswith(ARCHIVES))):
         if not args.directory: raise Error('Directory archives require -C <new-directory>')
+        # Preserve absolute member names for rejection by the safe restore path.
+        command = [tool('bsdtar'), '-cPf', '-', '--format', 'pax', '@' + str(source)] if fmt else None
         root = Path(args.directory).absolute()
         status = root.with_name(root.name + '.bio-cli-incomplete')
         # A sibling marker remains writable even if archive metadata makes root read-only.
@@ -353,7 +465,7 @@ def unpack(args):
         expanded_bytes = 0
         try:
             marker.write_text('Extraction incomplete; see sibling status marker.\n')
-            with reader(source) as r:
+            with reader(source, command) as r:
                 with tarfile.open(fileobj=r.stream, mode='r|') as archive:
                     for member in iter_tar(archive):
                         member_count += 1
@@ -367,6 +479,12 @@ def unpack(args):
                             raise Error('Archive member conflicts with restore status marker')
                         extract_member(archive, member, root, directories)
                 while r.stream.read(65536): pass
+            if args.verify_rar:
+                checked_backend([verifier, 't', '-cfg-', '-p-', '-ierr', '-idq', '--', str(source)],
+                                stdout=subprocess.DEVNULL)
+                latest = source.stat()
+                if not os.path.samestat(original, latest) or (original.st_size, original.st_mtime_ns) != (latest.st_size, latest.st_mtime_ns):
+                    raise Error('RAR source changed during restore or verification')
             marker.unlink()
             for dest in sorted(directories, key=lambda path: len(path.parts), reverse=True):
                 mode, mtime = directories[dest]
@@ -382,9 +500,11 @@ def unpack(args):
                 pass
             print(safe_text(('unpackz: incomplete restore; status at ' + str(status)).encode('utf-8', 'replace')), file=sys.stderr)
             raise
+        if fmt == 'rar' and not args.verify_rar:
+            print('unpackz: RAR decoded without an independent checksum test; use --verify-rar to require one', file=sys.stderr)
         print(safe_text(str(root).encode('utf-8', 'replace')))
     else:
-        if args.max_members is not None: raise Error('--max-members requires tar directory restore with -C')
+        if args.max_members is not None: raise Error('--max-members requires archive directory restore with -C')
         c = compression(source)
         if c not in ('zstd', 'gzip', 'xz', 'bzip2'): raise Error('Unsupported compressed stream')
         suffix = source.suffix.lower()
@@ -453,7 +573,7 @@ PEEK_EXAMPLES = """常用示例（文件名均为示例，请替换为自己的�
 格式与边界：
   文本：FASTA/FASTQ、GFF/GFF3/GTF、BED/WIG、VCF/gVCF、SAM、TSV/CSV、
         MTX、FAI/DICT、文本 ANN/AMB；支持 gzip/BGZF、zstd、xz、bzip2。
-  BAM/CRAM 依赖 samtools，BCF 依赖 bcftools；归档支持 tar 变体和 ZIP。
+  BAM/CRAM 依赖 samtools，BCF 依赖 bcftools；归档支持 tar 变体、ZIP、7z 和 RAR。
   BAI/CSI/TBI/GZI、BWA/BWA-MEM2 二进制索引仅显示元数据；
   BigWig/BigBed、HDF5/H5AD、RDS/RData 仅标识类别，不展开对象。
   默认上限为 200 行或 1 MiB，先达到者为准；长行可能被截断。
@@ -470,7 +590,7 @@ def configure_command(parser, command):
     parser.description = {
         'peek': '快速、限量预览生信文件：无需先将压缩文本解压到磁盘。',
         'packz': '压缩文件或打包目录；保留源文件，拒绝覆盖已有输出。',
-        'unpackz': '恢复压缩文件或 tar 归档；目标必须是新文件或新目录。',
+        'unpackz': '恢复压缩文件或 tar、ZIP、7z、RAR 归档；目标必须是新文件或新目录。',
     }[command]
     parser.add_argument('--version', action='version', version='bio-cli ' + VERSION)
     if command == 'peek':
@@ -482,18 +602,19 @@ def configure_command(parser, command):
         parser.add_argument('--reference', metavar='FASTA', help='CRAM 记录预览所需的本地参考；必须已有 FASTA.fai')
         parser.epilog = PEEK_EXAMPLES
     elif command == 'packz':
-        parser.add_argument('--format', choices=['zstd', 'gzip', 'bgzip'], default='zstd', help='压缩格式（默认：zstd）；目录只支持 zstd')
-        parser.add_argument('-t', '--threads', type=positive, default=2, help='工作线程数（默认：2；gzip 始终单线程）')
-        parser.add_argument('-l', '--level', type=int, choices=range(1, 20), default=3, help='压缩级别（默认：3）；gzip/BGZF 高于 9 时按 9 使用')
-        parser.add_argument('-o', '--output', help='指定新输出文件；默认在源文件旁添加 .zst/.gz 或 .tar.zst')
-        parser.epilog = '示例：\n  packz table.tsv\n  packz project_directory\n  packz --format bgzip variants.vcf\n  packz -t 2 -l 6 -o archive.tar.zst project_directory'
+        parser.add_argument('--format', choices=list(STREAM_SUFFIX) + ['tar'] + list(TAR_CODEC) + ['zip', '7z', 'rar'], default='zstd', help='压缩格式（默认：zstd）；目录默认 tar.zst')
+        parser.add_argument('-t', '--threads', type=positive, default=2, help='zstd、xz、BGZF 工作线程数（默认：2）')
+        parser.add_argument('-l', '--level', type=int, choices=range(1, 20), default=3, help='压缩级别（默认：3）；RAR 最高 5，zstd 最高 19，其他压缩格式最高 9')
+        parser.add_argument('-o', '--output', help='指定新输出文件；默认在源文件旁添加所选格式后缀')
+        parser.epilog = '示例：\n  packz table.tsv\n  packz project_directory\n  packz --format zip results\n  packz --format rar results\n  packz --format bgzip variants.vcf\n  packz -t 2 -l 6 -o archive.tar.zst project_directory'
     elif command == 'unpackz':
-        parser.add_argument('--max-members', type=positive, help='可选 tar 成员数量上限；超限保留未完成状态')
-        parser.add_argument('--max-output-bytes', type=positive, help='可选展开字节上限；tar 按普通文件声明大小累计')
+        parser.add_argument('--verify-rar', action='store_true', help='用 RARLAB unrar 或 rar 校验源归档，成功后才完成目录恢复')
+        parser.add_argument('--max-members', type=positive, help='可选归档成员数量上限；超限保留未完成状态')
+        parser.add_argument('--max-output-bytes', type=positive, help='可选展开字节上限；归档按普通文件声明大小累计')
         mode = parser.add_mutually_exclusive_group()
-        mode.add_argument('-C', '--directory', help='按 tar 归档恢复到新目录；显式指定时不依赖文件后缀')
+        mode.add_argument('-C', '--directory', help='按归档恢复到新目录；显式指定时不依赖文件后缀')
         mode.add_argument('-o', '--output', help='按单个压缩流恢复到新文件；即使名字含 .tar 也不展开归档')
-        parser.epilog = '示例：\n  unpackz table.tsv.zst -o restored.tsv\n  unpackz archive.tar.zst -C restored_project\n  unpackz archive.tar.zst -C limited --max-members 100000 --max-output-bytes 10737418240\n  unpackz table.tsv.zst -o limited.tsv --max-output-bytes 104857600\n\n限额为可选正整数，默认不设；超限保留失败状态，不自动清理。\nZIP 仅支持 peek 列表预览，不支持 unpackz 解包。'
+        parser.epilog = '示例：\n  unpackz table.tsv.zst -o restored.tsv\n  unpackz archive.tar.zst -C restored_project\n  unpackz archive.tar.zst -C limited --max-members 100000 --max-output-bytes 10737418240\n  unpackz table.tsv.zst -o limited.tsv --max-output-bytes 104857600\n\n限额为可选正整数，默认不设；超限保留失败状态，不自动清理。\n示例：unpackz archive.rar -C restored'
     parser.add_argument('input', metavar='FILE' if command != 'packz' else 'PATH', help='待处理的文件' if command != 'packz' else '待压缩的文件或目录')
 
 

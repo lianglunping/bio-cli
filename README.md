@@ -44,10 +44,14 @@ peek -n 30 reference.fa.gz                          # 前 30 行，不是 30 条
 peek --header alignments.bam                       # BAM 头部
 peek --reference reference.fa alignments.cram      # 需要已有 reference.fa.fai
 peek variants.bcf                                 # 转为 VCF 文本预览
-peek -n 10 archive.tar.zst                         # 列出归档成员，不解包
+peek -n 10 archive.rar                             # 列出归档成员，不解包
 peek --no-pager table.tsv                          # 直接输出；管道自动关闭分页
 
 packz table.tsv                                   # 输出 table.tsv.zst
+packz --format zip results                        # 输出 results.zip
+packz --format 7z results                         # 输出 results.7z
+packz --format rar results                        # 输出 results.rar，需要官方 rar
+unpackz --verify-rar delivery.rar -C restored_delivery  # 用 RARLAB unrar 或 rar 验收
 packz project_directory                           # 输出 project_directory.tar.zst
 packz --format bgzip variants.vcf                  # 输出 BGZF；不自动建索引
 unpackz table.tsv.zst -o restored.tsv
@@ -62,10 +66,10 @@ unpackz project_directory.tar.zst -C restored      # 内容在 restored/project_
 |---|---|
 | FASTA/FASTQ、GFF/GTF、BED、VCF/gVCF、SAM、TSV/CSV 等文本 | 限量读取；支持 gzip/BGZF、zstd、xz、bzip2，压缩按魔数识别 |
 | BAM / CRAM / BCF | samtools / bcftools 转为文本；CRAM 记录预览需本地参考及已有 `.fai` |
-| tar 及压缩 tar、ZIP | 列出成员；ZIP 仅预览 |
+| tar 及压缩 tar、ZIP、7z、RAR | 创建、列出成员及恢复到新目录。ZIP/7z/RAR 解包与 7z/RAR 预览需要 bsdtar；ZIP/7z 创建也用 bsdtar，RAR 创建需要官方 rar |
 | BAI/CSI/TBI、常见 BWA 索引、BigWig/BigBed、HDF5/H5AD、RDS/RData | 仅显示文件元数据，不读取对象内容 |
 
-目录压缩使用 `.tar.zst`，默认 2 个线程、zstd 级别 3；单文件还可选 gzip/BGZF。恢复要求新目标，失败会保留临时输出或 `<目标目录名>.bio-cli-incomplete` 状态。工具不自动排序、标准化或建立索引。具体安全检查、元数据保留范围及性能边界见[使用说明](docs/usage.md)与[开发说明](docs/development.md)。
+目录压缩默认使用 `.tar.zst`，默认 2 个线程、zstd 级别 3；单文件还可选 gzip/BGZF、xz、bzip2。恢复要求新目标，失败会保留临时输出或 `<目标目录名>.bio-cli-incomplete` 状态。工具不自动排序、标准化或建立索引。具体安全检查、元数据保留范围及性能边界见[使用说明](docs/usage.md)与[开发说明](docs/development.md)。
 
 ## 详细文档
 

@@ -116,8 +116,8 @@ class Acceptance(unittest.TestCase):
             with tarfile.open(f,mode) as a:
                 i=tarfile.TarInfo('synthetic/a.txt');i.size=len(self.text);a.addfile(i,io.BytesIO(self.text))
             self.assertIn(b'synthetic/a.txt',self.runcli('peek',f).stdout)
-    def test_roundtrip_file_zstd_gzip_bgzip(self):
-        for fmt in ['zstd','gzip','bgzip']:
+    def test_stream_roundtrips(self):
+        for fmt in ['zstd','gzip','bgzip','bzip2','xz']:
             f=self.put('synthetic-'+fmt+'.txt')
             r=self.runcli('packz','--format',fmt,f)
             packed=Path(r.stdout.decode().strip())
@@ -144,6 +144,81 @@ class Acceptance(unittest.TestCase):
         self.assertEqual((restored/'run.sh').stat().st_mode & 0o777,0o755)
         self.runcli('unpackz',archive,'-C',dest,ok=False)
         self.runcli('packz',d,'-o',d/'nested.tar.zst',ok=False)
+    def test_common_archive_roundtrips(self):
+        source = self.p / 'sample project'
+        source.mkdir()
+        (source / 'empty').mkdir()
+        (source / 'reads.fa').write_bytes(self.text)
+        for fmt in ('zip', '7z', 'tar', 'tar.gz', 'tar.bz2', 'tar.xz', 'tar.zst'):
+            with self.subTest(fmt=fmt):
+                path = Path(self.runcli('packz', '--format', fmt, source).stdout.decode().strip())
+                self.assertEqual(path.name, source.name + '.' + fmt)
+                self.assertIn(b'reads.fa', self.runcli('peek', path).stdout)
+                root = self.p / fmt
+                self.runcli('unpackz', path, '-C', root)
+                self.assertEqual((root / source.name / 'reads.fa').read_bytes(), self.text)
+                self.assertTrue((root / source.name / 'empty').is_dir())
+                self.runcli('unpackz', path, '-C', root, ok=False)
+
+    def test_real_rar_archives(self):
+        fixtures = ROOT / 'tests' / 'fixtures'
+        rar = fixtures / 'test_read_format_rar.rar'
+        listing = self.runcli('peek', '-n', '1', rar)
+        self.assertEqual(listing.stdout, b'test.txt\n')
+        self.assertIn(b'limit', listing.stderr)
+        result = self.runcli('unpackz', rar, '-C', self.p / 'old')
+        self.assertIn(b'--verify-rar', result.stderr)
+        self.assertEqual((self.p / 'old/testdir/test.txt').read_bytes(), b'test text document\r\n')
+        rar5 = self.put('renamed.archive', (fixtures / 'test_read_format_rar5_compressed.rar').read_bytes())
+        self.runcli('unpackz', rar5, '-C', self.p / 'new')
+        expected = b''.join(max(0, k*k - 3*k + 1).to_bytes(4, 'little') for k in range(1, 301))
+        self.assertEqual((self.p / 'new/test.bin').read_bytes(), expected)
+        self.runcli('unpackz', rar5, '-o', self.p / 'wrong', ok=False)
+        self.assertFalse((self.p / 'wrong').exists())
+        for flag, value, src in [('--max-members', '1', rar), ('--max-output-bytes', '1199', rar5)]:
+            dest = self.p / flag
+            self.runcli('unpackz', src, '-C', dest, flag, value, ok=False)
+            self.assertTrue(Path(str(dest) + '.bio-cli-incomplete').is_file())
+        broken = self.put('broken.rar', rar5.read_bytes()[:200])
+        self.runcli('unpackz', broken, '-C', self.p / 'partial', ok=False)
+        self.assertTrue((self.p / 'partial.bio-cli-incomplete').is_file())
+
+    def test_strict_rar_requires_verifier_before_creating_destination(self):
+        dest = self.p / 'restored'
+        archive = ROOT / 'tests/fixtures/test_read_format_rar.rar'
+        command = [sys.executable, str(CLI), 'unpackz', '--verify-rar', str(archive), '-C', str(dest)]
+        result = subprocess.run(command, env=dict(os.environ, PATH=str(self.p)), capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'RARLAB', result.stderr)
+        self.assertFalse(dest.exists())
+        self.assertFalse(Path(str(dest) + '.bio-cli-incomplete').exists())
+        self.runcli('unpackz', '--verify-rar', self.put('stream.gz', gzip.compress(self.text)), '-C', dest, ok=False)
+        self.assertFalse(dest.exists())
+
+    def test_verifier_failure_preserves_incomplete_status(self):
+        # Inject a native command failure at the final step, after a valid decode.
+        native = self.p / 'unrar'
+        native.write_text('#!/bin/sh\nif [ "$#" -eq 0 ]; then echo "UNRAR 7.23 Roshal"; exit 0; fi\necho "checksum error" >&2\nexit 3\n')
+        native.chmod(0o755)
+        dest = self.p / 'restore'
+        archive = ROOT / 'tests/fixtures/test_read_format_rar.rar'
+        env = dict(os.environ, PATH=str(self.p) + os.pathsep + os.environ['PATH'])
+        result = subprocess.run([sys.executable, str(CLI), 'unpackz', str(archive), '-C', str(dest),
+                                 '--verify-rar'], env=env, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'checksum error', result.stderr)
+        self.assertEqual(result.stdout, b'')
+        self.assertTrue(Path(str(dest) + '.bio-cli-incomplete').is_file())
+        self.assertEqual((dest / 'test.txt').read_bytes(), b'test text document\r\n')
+
+    def test_zip_escape_and_invalid_rar(self):
+        archive = self.p / 'unsafe.zip'
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('../escape', self.text)
+        self.runcli('unpackz', archive, '-C', self.p / 'output', ok=False)
+        self.assertFalse((self.p / 'escape').exists())
+        self.runcli('peek', self.put('fake.rar', b'#mtree\n'), ok=False)
+
     def test_archive_traversal_rejected(self):
         f=self.p/'evil.tar'
         with tarfile.open(f,'w') as a:

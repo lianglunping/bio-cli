@@ -41,10 +41,10 @@ class BoundedCapture:
 
 class ManagedProcess:
     def __init__(self, command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                 env=None, timeout=None, capture_stdout=False, limit=65536):
+                 env=None, timeout=None, capture_stdout=False, limit=65536, cwd=None):
         self.command = command
         self.proc = subprocess.Popen(command, stdin=stdin, stdout=stdout,
-                                     stderr=subprocess.PIPE, env=env,
+                                     stderr=subprocess.PIPE, env=env, cwd=cwd,
                                      start_new_session=True)
         self.errors = BoundedCapture(self.proc.stderr, limit)
         self.output = BoundedCapture(self.proc.stdout, limit) if capture_stdout else None

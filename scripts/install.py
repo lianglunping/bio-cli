@@ -20,6 +20,8 @@ FILES = ['bio_runtime.py','tests/test_runtime.py','tests/test_fetch_tools.py','b
          'scripts/fetch_tools.py','tests/test_cli.py','tests/test_installer.py','CHANGELOG.md']
 FILES += sorted(path.relative_to(Path(__file__).resolve().parents[1]).as_posix()
                 for path in (Path(__file__).resolve().parents[1] / 'docs').rglob('*.md'))
+FILES += ['tests/fixtures/test_read_format_rar.rar', 'tests/fixtures/test_read_format_rar5_compressed.rar',
+          'tests/fixtures/NOTICE.txt']
 OWNED = ['peek','packz','unpackz','dust-du','bio-cli']
 KNOWN = ['python3','tar','gzip','bzip2','xz','zstd','samtools','bcftools','bgzip',
          'gdu','dust-du','dua','bat','rg','fd','eza']

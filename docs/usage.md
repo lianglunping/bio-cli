@@ -14,6 +14,7 @@ peek --header alignments.bam
 peek variants.bcf
 peek --reference reference.fa alignments.cram
 peek archive.tar.zst
+peek -n 10 delivery.rar
 peek --timeout 10 variants.bcf
 peek --no-pager variants.vcf.gz | head -10
 ```
@@ -24,7 +25,7 @@ peek --no-pager variants.vcf.gz | head -10
 
 支持 FASTA/FASTQ、GFF/GFF3/GTF、BED/bedGraph/WIG、VCF/gVCF、SAM、TSV/CSV/MTX、FAI/DICT、文本 ANN/AMB 及 gzip/BGZF、zstd、xz、bzip2 压缩文本。压缩按文件魔数识别。BAM/CRAM 使用 samtools，BCF 使用 bcftools。CRAM 记录预览要求本地参考及已有 `.fai`；头部查看不需要参考。不会自动创建索引、排序、标准化或查询远程数据。
 
-BAI/CSI/TBI/GZI、BWA/BWA-MEM2 的 PAC/BWT/SA/0123/BWT.2bit.64 索引只显示元数据；BigWig/BigBed/HDF5/H5AD/RDS/RData 首版只标识类别，不读取对象内容。普通文本 `.ann`、`.amb` 不误判为二进制。归档支持 tar、tar.gz/tgz、tar.zst/tzst、tar.xz/txz、tar.bz2/tbz2、ZIP 的目录列表；ZIP 中央目录由 Python 标准库读取，含极多成员的 ZIP 仍可能占较多内存。
+BAI/CSI/TBI/GZI、BWA/BWA-MEM2 的 PAC/BWT/SA/0123/BWT.2bit.64 索引只显示元数据；BigWig/BigBed/HDF5/H5AD/RDS/RData 首版只标识类别，不读取对象内容。普通文本 `.ann`、`.amb` 不误判为二进制。归档支持 tar、tar.gz/tgz、tar.zst/tzst、tar.xz/txz、tar.bz2/tbz2、ZIP、7z 和 RAR 的目录列表；ZIP 中央目录由 Python 标准库读取，含极多成员的 ZIP 仍可能占较多内存。
 
 
 
@@ -56,6 +57,11 @@ BAI/CSI/TBI/GZI、BWA/BWA-MEM2 的 PAC/BWT/SA/0123/BWT.2bit.64 索引只显示�
 ```sh
 packz table.tsv
 packz project_directory
+packz --format tar.gz project_directory
+packz --format zip project_directory
+packz --format 7z project_directory
+packz --format rar project_directory
+unpackz delivery.rar -C restored_delivery
 packz --format gzip reads.fastq
 packz --format bgzip variants.vcf
 packz -t 2 -l 6 -o archive.tar.zst project_directory
@@ -66,7 +72,16 @@ unpackz archive.tar.zst -C bounded_restore --max-members 100000 --max-output-byt
 
 ## packz：格式、线程与输出
 
-`packz` 默认 zstd 级别 3、2 个工作线程，源文件保留，目录输出 `.tar.zst` 并放在源目录外。单文件可选 gzip 或 BGZF；gzip 为单线程，线程参数不改变它。BGZF 与普通 gzip 都可用 `.gz` 后缀，但只有 BGZF 提供分块随机访问基础；本工具不会自动创建索引。gzip/BGZF 的级别最高为 9，高于 9 的参数按 9 使用。
+| 输入与输出 | `packz --format` | 恢复 |
+|---|---|---|
+| 单文件压缩流 | `zstd`（默认）、`gzip`、`bgzip`、`xz`、`bzip2` | `unpackz FILE -o NEW_FILE` |
+| 文件或目录打包 | `tar`、`tar.gz`、`tar.bz2`、`tar.xz`、`tar.zst` | `unpackz ARCHIVE -C NEW_DIR` |
+| 文件或目录打包，用于跨平台交换 | `zip`、`7z`、`rar` | 同上，恢复到新目录 |
+
+目录默认生成 `.tar.zst`。对目录指定 gzip、bzip2、xz 或 zstd 会自动先打 tar。需要压缩单文件并保留归档内文件名时，例如 `packz --format tar.gz table.tsv`。格式由 `--format` 决定，`-o` 指定新文件名。压缩级别默认 3，zstd 可到 19，RAR 到 5，其余压缩格式到 9。更高的值按格式上限使用。`-t` 控制 zstd、xz 和 BGZF 的线程。BGZF 使用 .gz 后缀，可用于后续建立索引。
+
+ZIP、7z、RAR 的创建面向普通文件和目录。含符号链接的目录使用 tar 系列。ZIP/7z/RAR 使用各格式支持的元数据；空目录和目录层级随归档保存。新格式依赖见[安装说明](installation.md)。7z/RAR 预览每行列一个成员名。本次支持普通未加密单卷归档。RAR 解码能力随 libarchive 构建而异；部分旧式 RAR 的内容改变后仍可能解码成功。需要独立校验时使用 `unpackz --verify-rar archive.rar -C new_directory`。该模式要求 PATH 中有 RARLAB 的 unrar 或 rar。恢复和限额检查完成后，工具再次读取源归档并执行完整性测试，通过后才清除未完成标记。两遍读取期间应保持源归档不变。对于交付文件，还可核对来源方的校验和。创建 RAR 时会先执行 `rar t` 再发布。
+
 
 ## packz：发布与源目录约定
 
@@ -74,11 +89,11 @@ unpackz archive.tar.zst -C bounded_restore --max-members 100000 --max-output-byt
 
 ## unpackz：恢复模式与状态
 
-`unpackz` 支持 gzip/BGZF、zstd、xz、bzip2 单文件及上述 tar 归档。`-C` 显式选择 tar 目录恢复，`-o` 显式选择单个压缩流恢复，两者互斥，显式选择优先于文件后缀。例如目录打包为 `backup.zst` 后可用 `unpackz backup.zst -C restored`；压缩已有 tar 文件后可用 `unpackz existing.tar.zst -o restored.tar` 恢复 tar 文件本身。未指定模式时，仅用后缀提供默认分类。ZIP 仅预览，不解包。拒绝覆盖目标；目录恢复要求新的目标目录。绝对路径、`..`、逃逸符号链接和特殊设备成员被拒绝。正常内部符号链接与已出现目标的硬链接可恢复；前向硬链接拒绝。恢复期间会在目标目录旁创建 `<目标目录名>.bio-cli-incomplete` 状态文件；只有内容及权限/时间全部处理成功才删除。失败时该相邻状态文件保留，目录内也尽力保留 `.bio-cli-incomplete` 兼容标记。只读根目录可能阻止目录内标记写入，因此以相邻状态文件为准；不会自动删除失败目录或原始归档。归档根层的 `.bio-cli-incomplete` 成员名被保留给状态管理，冲突会报错。保留常规权限、文件修改时间及内部链接；不保证 ACL、扩展属性、资源叉、所有者或文件系统快照语义。单文件压缩只保留内容，不保存原权限与时间。
+`unpackz` 支持 gzip/BGZF、zstd、xz、bzip2 单文件流及上述归档。`-C` 显式选择归档目录恢复，`-o` 显式选择单个压缩流恢复，两者互斥，显式选择优先于文件后缀。例如目录打包为 `backup.zst` 后可用 `unpackz backup.zst -C restored`；压缩已有 tar 文件后可用 `unpackz existing.tar.zst -o restored.tar` 恢复 tar 文件本身。ZIP、7z 和 RAR 根据文件头识别，恢复时需要 `-C`。tar 系列默认按后缀分类。拒绝覆盖目标；目录恢复要求新的目标目录。绝对路径、`..`、逃逸符号链接和特殊设备成员被拒绝。正常内部符号链接与已出现目标的硬链接可恢复；前向硬链接拒绝。恢复期间会在目标目录旁创建 `<目标目录名>.bio-cli-incomplete` 状态文件；只有内容及权限/时间全部处理成功才删除。失败时该相邻状态文件保留，目录内也尽力保留 `.bio-cli-incomplete` 兼容标记。只读根目录可能阻止目录内标记写入，因此以相邻状态文件为准；不会自动删除失败目录或原始归档。归档根层的 `.bio-cli-incomplete` 成员名被保留给状态管理，冲突会报错。保留常规权限、文件修改时间及内部链接；不保证 ACL、扩展属性、资源叉、所有者或文件系统快照语义。单文件压缩只保留内容，不保存原权限与时间。
 
 ## unpackz：成员与字节限额
 
-恢复限额均为可选正整数，默认不设上限。`--max-members` 限制 tar 实际成员条目数（目录与链接也计入）；`--max-output-bytes` 限制 tar 普通文件声明大小之和，或单个压缩流实际恢复的字节数。例如上面的命令允许最多 100000 个 tar 成员和 10 GiB 文件内容。限额触发时退出、保留不完整状态，不发布单文件正式目标。它们不衡量物理磁盘用量、不限制所有归档元数据和输入 I/O，也不保证处理任意恶意归档的固定内存上限。
+恢复限额均为可选正整数，默认不设上限。`--max-members` 限制归档实际成员条目数（目录与链接也计入）；`--max-output-bytes` 限制归档普通文件声明大小之和，或单个压缩流实际恢复的字节数。例如上面的命令允许最多 100000 个归档成员和 10 GiB 文件内容。限额触发时退出、保留不完整状态，不发布单文件正式目标。它们不衡量物理磁盘用量、不限制所有归档元数据和输入 I/O，也不保证处理任意恶意归档的固定内存上限。
 
 ## tar 目录预览的读取范围
 
